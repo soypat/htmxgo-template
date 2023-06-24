@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <meta http-equiv='X-UA-Compatible' content='IE=edge'>
+    <title>HTMX-Go Template</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <link rel="stylesheet" href="https://unpkg.com/missing.css@1.0.9/dist/missing.min.css">
+    <link rel="stylesheet" href="/assets/css/modal.css">
+    <script src="https://unpkg.com/htmx.org@1.9.2" integrity="sha384-L6OqL9pRWyyFU3+/bjdSri+iIphTN/bvYyM37tICVyOJkWZLpP2vGn6VUEXgzg6h" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/hyperscript.org@0.9.8"></script>
+</head>
+<body>
+    <img src="/assets/img/htmx-logo.png" alt="logo" style="width:20%;" class="logo">
+    <p>HTMX is awesome!</p>
+    <div hx-get="/table" hx-trigger="every 1s" hx-swap="outerHTML"></div>
+</body>
+</html>

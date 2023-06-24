@@ -1,0 +1,24 @@
+<button hx-get="/assets/record_create.html" hx-target="body" hx-swap="beforeend">Open a Modal</button>
+
+<table class="table">
+    <thead>
+      <tr>
+        <th>Document Name</th>
+        <th>Author</th>
+        <th>Description</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody hx-confirm="Are you sure?" hx-target="closest tr" hx-swap="outerHTML swap:1s">
+    {{ range $record := . }}
+    <tr>
+        <td>{{ $record.DocumentName }}</td>
+        <td>{{ $record.Author }}</td>
+        <td>{{ $record.Description }}</td>
+        <td>
+          <button class="btn btn-sm btn-danger" hx-delete="/table/action/{{ $record.DocumentName }}">Delete</button>
+        </td>
+    </tr>
+    {{ end }}
+    </tbody>
+  </table>
