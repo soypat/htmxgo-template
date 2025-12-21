@@ -40,6 +40,12 @@ type Server struct {
 }
 
 func (sv *Server) Run() error {
+	page := sv.addr
+	if page[0] == ':' {
+		page = "localhost" + page
+	}
+	page = "http://" + page
+	slog.Info("listen-serve", slog.String("addr", page))
 	return http.ListenAndServe(sv.addr, sv.router)
 }
 
@@ -47,7 +53,10 @@ func (sv *Server) Init(flags Flags) (err error) {
 	slog.Debug("Server.Init")
 	if sv.router != nil {
 		return errors.New("Server already initialized")
+	} else if len(flags.Addr) == 0 {
+		return errors.New("empty address")
 	}
+
 	err = sv.db.Open("db.bbolt")
 	if err != nil {
 		return err
@@ -61,6 +70,7 @@ func (sv *Server) Init(flags Flags) (err error) {
 		const devEmail = "dev@example.com"
 		sv.db.UserCreate(User{Email: devEmail, ID: uuid.Max, Provider: "nowhere"})
 		sv.auth = &DevAuth{Email: devEmail}
+		slog.Warn("developer-mode")
 	}
 	if err != nil {
 		return err
