@@ -71,7 +71,10 @@ func (sv *Server) Init(flags Flags) (err error) {
 		sv.auth = &auth
 	} else {
 		const devEmail = "dev@example.com"
-		sv.db.UserCreate(User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: RoleOwner})
+		// Keep developer permissions to a sane minimum.
+		// Owners should have destructive power, ensure owners log in via Oauth.
+		const devRole = RoleAdmin
+		sv.db.UserCreate(User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: devRole})
 		sv.auth = &DevAuth{Email: devEmail}
 		slog.Warn("developer-mode")
 	}
@@ -105,7 +108,7 @@ func (sv *Server) RequireAuth(next http.Handler) http.HandlerFunc {
 	}
 }
 
-func (sv *Server) HandleFunc(clearance Role, parentPattern string, handler RoleHandlerFunc) {
+func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handler RoleHandlerFunc) {
 	sv.router.HandleFunc(parentPattern, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
@@ -115,7 +118,7 @@ func (sv *Server) HandleFunc(clearance Role, parentPattern string, handler RoleH
 			return
 		}
 		rc := sv.RenderContext(w, r)
-		if !clearance.HasClearance(rc.User) {
+		if !rc.User.HasClearance(requiredClearance) {
 			http.NotFound(w, r)
 			return
 		}

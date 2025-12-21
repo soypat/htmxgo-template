@@ -109,7 +109,9 @@ templ page(component templ.Component, rc RequestContext) {
 		<body hx-ext="sse" sse-connect="/sse">
 			<nav>
 				@activeLink("/", "Home", rc.Page == pageLanding)
-				@activeLink("/users", "Users", rc.Page == pageUsers)
+				if rc.User.HasClearance(RoleAdmin) {
+					@activeLink("/users", "Users", rc.Page == pageUsers)
+				}
 				<span class="spacer"></span>
 				<span class="email">{ rc.User.Email }</span>
 				<a href="/logout">Logout</a>

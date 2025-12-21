@@ -27,6 +27,10 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+func (u *User) HasClearance(requiredClearance Role) bool {
+	return u.Role >= requiredClearance
+}
+
 func (u *User) Validate() error {
 	var z uuid.UUID
 	if u.ID == z {

@@ -22,13 +22,6 @@ const (
 
 type Role int
 
-func (clearance Role) HasClearance(u User) bool {
-	if u.Role < clearance {
-		return false
-	}
-	return true
-}
-
 func (enum Role) MarshalJSON() ([]byte, error) { return []byte(strconv.Quote(enum.String())), nil }
 
 func (enum *Role) UnmarshalJSON(b []byte) error {
