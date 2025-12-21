@@ -59,6 +59,12 @@ type Store struct {
 	mailCache   map[string]uuid.UUID
 }
 
+func (db *Store) cacheMail(mail string, id uuid.UUID) {
+	db.mailCacheMu.Lock()
+	db.mailCache[mail] = id
+	db.mailCacheMu.Unlock()
+}
+
 func (db *Store) Open(filename string) error {
 	db.Close()
 	bdb, err := bbolt.Open(filename, 0777, bbolt.DefaultOptions)
@@ -131,8 +137,7 @@ func (db *Store) UserByEmail(dst *User, email string) error {
 	return db.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketUsers)
 		err = b.ForEach(func(k, v []byte) error {
-			// Quite inefficient for several users, prefer searching users by UUID until adding a cache.
-			if bytes.Contains(v, emailb) {
+			if bytes.Contains(v, emailb) { // This is innefficient, evaluate warm startup so that mailCache is guaranteed to have all entries.
 				err = json.Unmarshal(v, dst)
 				if dst.Email == email {
 					return errEndIter
@@ -141,9 +146,7 @@ func (db *Store) UserByEmail(dst *User, email string) error {
 			return nil
 		})
 		if err == errEndIter {
-			db.mailCacheMu.Lock()
-			db.mailCache[email] = dst.ID
-			db.mailCacheMu.Unlock()
+			db.cacheMail(email, dst.ID)
 			return nil
 		}
 		return errors.New("email not found")
@@ -167,9 +170,7 @@ func (db *Store) UserCreate(newUser User) error {
 		if err != nil {
 			panic(err) // Unreachable in theory.
 		}
-		db.mailCacheMu.Lock()
-		db.mailCache[newUser.Email] = newUser.ID
-		db.mailCacheMu.Unlock()
+		db.cacheMail(newUser.Email, newUser.ID)
 		return b.Put(newUser.ID[:], data)
 	})
 }
@@ -184,6 +185,15 @@ func (db *Store) UserUpdate(updatedUser User) error {
 		data := b.Get(updatedUser.ID[:])
 		if data == nil {
 			return errors.New("could not find user to update")
+		}
+		var tmpUsr User
+		json.Unmarshal(data, &tmpUsr)
+		if tmpUsr.Email != updatedUser.Email {
+			// Email change cache update.
+			db.mailCacheMu.Lock()
+			delete(db.mailCache, tmpUsr.Email)
+			db.mailCache[updatedUser.Email] = updatedUser.ID
+			db.mailCacheMu.Unlock()
 		}
 		updatedUser.UpdatedAt = time.Now()
 		data, err := json.Marshal(updatedUser)
