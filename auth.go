@@ -173,7 +173,6 @@ func (a *Auth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		delete(a.sessions, cookie.Value)
 	}
-
 	http.SetCookie(w, &http.Cookie{
 		Name:   sessionCookie,
 		Value:  "",
@@ -214,6 +213,7 @@ func (d *DevAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 func enumUnmarshalJSON[T interface {
 	~int | ~uint | ~uint8 | ~int64 | ~uint64 // common enum types.
 	String() string
+	IsValid() bool
 }](ptr *T, b []byte, maxEnumLim T) error {
 	strq := string(b)
 	bs, err := strconv.Unquote(strq)
@@ -223,10 +223,13 @@ func enumUnmarshalJSON[T interface {
 	if len(bs) == 0 {
 		return errors.New("cannot unmarshal empty enum string")
 	}
-	var v T = 1
-	for v = 1; v < maxEnumLim; v++ {
+	var v T
+	for v = 0; v < maxEnumLim; v++ {
 		str := v.String()
 		if str == bs {
+			if !v.IsValid() {
+				return errors.New("invalid enum value: " + strq)
+			}
 			*ptr = v
 			return nil
 		}

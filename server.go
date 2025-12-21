@@ -66,7 +66,12 @@ func (sv *Server) Init(flags Flags) (err error) {
 	}
 	sv.addr = flags.Addr
 	var devrole Role
-	devrole.UnmarshalJSON([]byte("\"" + string(flags.DevModeRole) + "\""))
+	if flags.DevModeRole != "" {
+		err = devrole.UnmarshalJSON([]byte("\"" + flags.DevModeRole + "\""))
+		if err != nil {
+			return err
+		}
+	}
 	if devrole.IsValid() {
 		const devEmail = "dev@example.com"
 		usr := User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: devrole}
@@ -81,6 +86,7 @@ func (sv *Server) Init(flags Flags) (err error) {
 		var auth Auth
 		err = auth.Config(flags)
 		sv.auth = &auth
+		slog.Warn("PRODUCTION-MODE")
 	}
 	if err != nil {
 		return err
