@@ -25,15 +25,14 @@ import (
 //
 // The email-based approach was chosen because toast notifications in this app are user-level
 // events (not request-specific), and showing them across all tabs improves UX.
-func (sv *Server) handleSSE() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		connID := uuid.New().String()[:8]
-		email := sv.auth.GetEmail(r)
-		if email == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+func (sv *Server) handleSSE() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		if rc.User.Role < RoleUser {
+			http.Error(w, "", http.StatusForbidden)
+			return // Safety return, just in case.
 		}
-
+		connID := uuid.New().String()[:8]
+		email := rc.User.Email
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -105,13 +104,13 @@ func (sv *Server) handleSSE() http.HandlerFunc {
 }
 
 // handleSendUserToast sends a toast notification to a specific user via SSE.
-func (sv *Server) handleSendUserToast() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (sv *Server) handleSendUserToast() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		adminEmail := sv.auth.GetEmail(r)
+		adminEmail := rc.User.Email
 
 		email := r.FormValue("email")
 		message := r.FormValue("message")
@@ -150,7 +149,6 @@ func (sv *Server) handleSendUserToast() http.HandlerFunc {
 				Message: err.Error(),
 			})
 		}
-
 	}
 }
 

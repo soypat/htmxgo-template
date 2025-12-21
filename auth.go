@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -18,6 +19,35 @@ const (
 	sessionCookie = "gsan_session"
 	stateCookie   = "gsan_oauth_state"
 )
+
+type Role int
+
+func (clearance Role) HasClearance(u User) bool {
+	if u.Role < clearance {
+		return false
+	}
+	return true
+}
+
+func (enum Role) MarshalJSON() ([]byte, error) { return []byte(strconv.Quote(enum.String())), nil }
+
+func (enum *Role) UnmarshalJSON(b []byte) error {
+	return enumUnmarshalJSON(enum, b, RoleOwner)
+}
+
+const (
+	roleUndefined Role = iota // undefined
+	RoleExternal              // external
+	RoleUser                  // user
+	RoleModerator             // mod
+	RoleAdmin                 // admin
+
+	// RoleOwner is the maximum role. Keep new roles under this unless adding something like "god-emperor"
+	// On changing this max value make sure to change enum marshalling call.
+	RoleOwner // owner
+)
+
+type RoleHandlerFunc func(w http.ResponseWriter, r *http.Request, rc RequestContext)
 
 type Authenticator interface {
 	GetEmail(r *http.Request) string
@@ -183,4 +213,27 @@ func (d *DevAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 func (d *DevAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+func enumUnmarshalJSON[T interface {
+	~int | ~uint | ~uint8
+	String() string
+}](ptr *T, b []byte, maxEnum T) error {
+	strq := string(b)
+	bs, err := strconv.Unquote(strq)
+	if err != nil {
+		return err
+	}
+	if len(bs) == 0 {
+		return errors.New("cannot unmarshal empty enum string")
+	}
+	var v T = 1
+	for v = 1; v <= maxEnum; v++ {
+		str := v.String()
+		if str == bs {
+			*ptr = v
+			return nil
+		}
+	}
+	return errors.New("cannot unmarshal JSON to enum: " + strq)
 }

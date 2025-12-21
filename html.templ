@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-templ landingPage(rc RenderContext) {
+templ landingPage(rc RequestContext) {
 	<h2>Welcome { rc.User.Email }!</h2>
 }
 
@@ -23,6 +23,7 @@ templ usersPage(users []User) {
 					<thead>
 						<tr>
 							<th>Email</th>
+							<th>Role</th>
 							<th>Provider</th>
 							<th>User ID</th>
 							<th>Created</th>
@@ -34,6 +35,7 @@ templ usersPage(users []User) {
 						for _, user := range users {
 							<tr>
 								<td class="user-email">{ user.Email }</td>
+								<td class="user-role">{ user.Role.String() }</td>
 								<td>
 									<span class={ "provider-badge", "provider-" + user.Provider }>{ user.Provider }</span>
 								</td>
@@ -98,7 +100,7 @@ templ toastSent() {
 	</div>
 }
 
-templ page(component templ.Component, rc RenderContext) {
+templ page(component templ.Component, rc RequestContext) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>

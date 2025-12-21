@@ -15,11 +15,14 @@ import (
 	"github.com/google/uuid"
 )
 
-type RenderContext struct {
+// Stores generic information about the request that is commonly used in
+// frontend rendering or within API endpoint logic.
+type RequestContext struct {
 	User User
 	Page Page
 }
 
+// Page state. Used to highlight current page.
 type Page uint8
 
 const (
@@ -68,7 +71,7 @@ func (sv *Server) Init(flags Flags) (err error) {
 		sv.auth = &auth
 	} else {
 		const devEmail = "dev@example.com"
-		sv.db.UserCreate(User{Email: devEmail, ID: uuid.Max, Provider: "nowhere"})
+		sv.db.UserCreate(User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: RoleOwner})
 		sv.auth = &DevAuth{Email: devEmail}
 		slog.Warn("developer-mode")
 	}
@@ -77,13 +80,13 @@ func (sv *Server) Init(flags Flags) (err error) {
 	}
 
 	sv.router = http.NewServeMux()
-	sv.HandleFunc("/", sv.handleLanding())
-	sv.HandleFunc("/users", sv.RequireAuth(sv.handleUsers()))
-	sv.HandleFunc("/users/send-toast", sv.RequireAuth(sv.handleSendUserToast()))
+	sv.HandleFuncNoAuth("/", sv.handleLanding())
+	sv.HandleFunc(RoleAdmin, "/users", sv.handleUsers())
+	sv.HandleFunc(RoleAdmin, "/users/send-toast", sv.handleSendUserToast())
 	if flags.DisableSSE {
-		sv.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "sse disabled", 401) })
+		sv.HandleFunc(RoleUser, "/sse", func(w http.ResponseWriter, r *http.Request, _ RequestContext) { http.Error(w, "sse disabled", 401) })
 	} else {
-		sv.HandleFunc("/sse", sv.handleSSE())
+		sv.HandleFunc(RoleUser, "/sse", sv.handleSSE())
 	}
 
 	return nil
@@ -102,7 +105,25 @@ func (sv *Server) RequireAuth(next http.Handler) http.HandlerFunc {
 	}
 }
 
-func (sv *Server) HandleFunc(parentPattern string, handler func(http.ResponseWriter, *http.Request)) {
+func (sv *Server) HandleFunc(clearance Role, parentPattern string, handler RoleHandlerFunc) {
+	sv.router.HandleFunc(parentPattern, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
+		}
+		if sv.auth.GetEmail(r) == "" {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		rc := sv.RenderContext(w, r)
+		if !clearance.HasClearance(rc.User) {
+			http.NotFound(w, r)
+			return
+		}
+		handler(w, r, rc)
+	})
+}
+
+func (sv *Server) HandleFuncNoAuth(parentPattern string, handler func(http.ResponseWriter, *http.Request)) {
 	sv.router.HandleFunc(parentPattern, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
@@ -111,12 +132,10 @@ func (sv *Server) HandleFunc(parentPattern string, handler func(http.ResponseWri
 	})
 }
 
-func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc RenderContext) {
-	email := sv.auth.GetEmail(r)
-	err := sv.db.UserByEmail(&rc.User, email)
+func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc RequestContext) {
+	err := sv.db.UserByEmail(&rc.User, sv.auth.GetEmail(r))
 	if err != nil {
 		rc.User = User{}
-		return rc
 	}
 	switch r.RequestURI {
 	case "/":
@@ -129,12 +148,12 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Rend
 
 func (sv *Server) handleLanding() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sv.servePage(w, r, landingPage(sv.RenderContext(w, r)))
+		sv.servePage(w, r, landingPage(sv.RenderContext(w, r)), sv.RenderContext(w, r))
 	}
 }
 
-func (sv *Server) handleUsers() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (sv *Server) handleUsers() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		var users []User
 		err := sv.db.Users(func(dst *User) error {
 			users = append(users, *dst)
@@ -144,13 +163,12 @@ func (sv *Server) handleUsers() http.HandlerFunc {
 			sv.error(w, err.Error(), 500)
 			return
 		}
-		sv.servePage(w, r, usersPage(users))
+		sv.servePage(w, r, usersPage(users), rc)
 	}
 }
 
 // servePage uses the `page` function and serves an entire page to the http response writer with `component` as the core page content.
-func (sv *Server) servePage(w http.ResponseWriter, r *http.Request, component templ.Component) {
-	rc := sv.RenderContext(w, r)
+func (sv *Server) servePage(w http.ResponseWriter, r *http.Request, component templ.Component, rc RequestContext) {
 	sv.serveComponent(w, r, page(component, rc))
 }
 

@@ -20,6 +20,7 @@ var (
 type User struct {
 	Email string    `json:"email"`
 	ID    uuid.UUID `json:"uuid"`
+	Role  Role      `json:"role"`
 	// Provider is the OAuth provider for this user's email.
 	Provider  string    `json:"provider"`
 	CreatedAt time.Time `json:"created_at"`

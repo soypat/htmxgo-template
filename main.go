@@ -1,6 +1,6 @@
 //go:generate go tool templ generate .
 //go:generate go tool templ fmt .
-
+//go:generate go tool stringer -linecomment -type Role -output stringers.go
 package main
 
 import (
