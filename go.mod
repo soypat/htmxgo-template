@@ -11,7 +11,6 @@ require (
 	github.com/a-h/templ v0.3.960
 	github.com/google/uuid v1.6.0
 	go.etcd.io/bbolt v1.4.3
-	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93
 	golang.org/x/oauth2 v0.34.0
 )
 
