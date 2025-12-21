@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/mail"
 	"sync"
 	"time"
@@ -31,14 +32,11 @@ type User struct {
 func (u *User) HasClearance(requiredClearance Role) bool {
 	return u.Role >= requiredClearance
 }
-
-func (u *User) Validate() error {
+func (u *User) validateForUpdate() error {
 	if !u.Role.IsValid() {
 		return errors.New("invalid user role")
 	} else if u.Provider != "nowhere" && u.Provider != "google" {
 		return errors.New("invalid user provider")
-	} else if u.CreatedAt.IsZero() || u.UpdatedAt.IsZero() {
-		return errors.New("invalid DB CRUD time")
 	}
 	var z uuid.UUID
 	if u.ID == z {
@@ -51,6 +49,12 @@ func (u *User) Validate() error {
 		return err
 	}
 	return nil
+}
+func (u *User) Validate() error {
+	if u.CreatedAt.IsZero() || u.UpdatedAt.IsZero() {
+		return errors.New("invalid DB CRUD time")
+	}
+	return u.validateForUpdate()
 }
 
 type Store struct {
@@ -154,7 +158,7 @@ func (db *Store) UserByEmail(dst *User, email string) error {
 }
 
 func (db *Store) UserCreate(newUser User) error {
-	err := newUser.Validate()
+	err := newUser.validateForUpdate()
 	if err != nil {
 		return err
 	}
@@ -176,7 +180,7 @@ func (db *Store) UserCreate(newUser User) error {
 }
 
 func (db *Store) UserUpdate(updatedUser User) error {
-	err := updatedUser.Validate()
+	err := updatedUser.validateForUpdate()
 	if err != nil {
 		return err
 	}
@@ -186,20 +190,22 @@ func (db *Store) UserUpdate(updatedUser User) error {
 		if data == nil {
 			return errors.New("could not find user to update")
 		}
-		var tmpUsr User
-		json.Unmarshal(data, &tmpUsr)
-		if tmpUsr.Email != updatedUser.Email {
+		var existing User
+		json.Unmarshal(data, &existing)
+		if existing.Email != updatedUser.Email {
 			// Email change cache update.
 			db.mailCacheMu.Lock()
-			delete(db.mailCache, tmpUsr.Email)
+			delete(db.mailCache, existing.Email)
 			db.mailCache[updatedUser.Email] = updatedUser.ID
 			db.mailCacheMu.Unlock()
 		}
+		updatedUser.CreatedAt = existing.CreatedAt
 		updatedUser.UpdatedAt = time.Now()
 		data, err := json.Marshal(updatedUser)
 		if err != nil {
 			panic(err) // Unreachable in theory.
 		}
+		fmt.Println("update old user", existing, "with new", updatedUser)
 		return b.Put(updatedUser.ID[:], data)
 	})
 }

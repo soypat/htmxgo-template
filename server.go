@@ -65,18 +65,22 @@ func (sv *Server) Init(flags Flags) (err error) {
 		return err
 	}
 	sv.addr = flags.Addr
-	if !flags.DevMode {
+	var devrole Role
+	devrole.UnmarshalJSON([]byte("\"" + string(flags.DevModeRole) + "\""))
+	if devrole.IsValid() {
+		const devEmail = "dev@example.com"
+		usr := User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: devrole}
+		sv.db.UserCreate(usr)
+		err = sv.db.UserUpdate(usr)
+		if err != nil {
+			return err
+		}
+		sv.auth = &DevAuth{Email: devEmail}
+		slog.Warn("developer-mode")
+	} else {
 		var auth Auth
 		err = auth.Config(flags)
 		sv.auth = &auth
-	} else {
-		const devEmail = "dev@example.com"
-		// Keep developer permissions to a sane minimum.
-		// Owners should have destructive power, ensure owners log in via Oauth.
-		const devRole = RoleAdmin
-		sv.db.UserCreate(User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: devRole})
-		sv.auth = &DevAuth{Email: devEmail}
-		slog.Warn("developer-mode")
 	}
 	if err != nil {
 		return err

@@ -14,7 +14,8 @@ import (
 )
 
 type Flags struct {
-	DevMode    bool
+	DevModeRole string
+
 	DisableSSE bool
 	LogLevel   int
 	Addr       string
@@ -27,13 +28,28 @@ type Flags struct {
 	RedirectURL string
 }
 
+const (
+	envSecret = "OASECRET"
+	envID     = "OAID"
+)
+
 func run() error {
 	var flags Flags
-	flag.BoolVar(&flags.DevMode, "dev", false, "Developer mode.")
+	flag.StringVar(&flags.DevModeRole, "dev", "", "Developer mode role from available: ['external', 'user', 'mod', 'admin', 'owner'].")
 	flag.BoolVar(&flags.DisableSSE, "disable-sse", false, "Disable SSE events (toasts).")
 	flag.StringVar(&flags.Addr, "http", ":8080", "Address on which to host HTTP server.")
+	flag.StringVar(&flags.ClientSecret, "oauth-secret", "", "OAuth client secret. DO NOT SET FLAG. Set via Environment "+envSecret)
+	flag.StringVar(&flags.ClientID, "oauth-cid", os.Getenv(envID), "OAuth client ID.")
 	flag.IntVar(&flags.LogLevel, "log", int(slog.LevelDebug), fmt.Sprintf("Logging level. DEBUG=%d INFO=%d WARN=%d ERROR=%d", slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError))
+	flag.StringVar(&flags.RedirectURL, "oauth-redirect", "http://localhost:8080/auth/callback", "Redirect URL for OAuth at /auth/callback endpoint. For local development is http://localhost:8080/auth/callback")
 	flag.Parse()
+	if flags.ClientSecret != "" {
+		return errors.New("client secret flag set only for documentation purposes. Set environment: " + envSecret)
+	}
+	flags.ClientSecret = os.Getenv(envSecret)
+	if flags.DevModeRole == "" && flags.ClientSecret == "" {
+		return errors.New("set OAuth client secret environment " + envSecret)
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.Level(flags.LogLevel),
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
