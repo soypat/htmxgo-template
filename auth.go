@@ -25,8 +25,10 @@ type Role int
 func (enum Role) MarshalJSON() ([]byte, error) { return []byte(strconv.Quote(enum.String())), nil }
 
 func (enum *Role) UnmarshalJSON(b []byte) error {
-	return enumUnmarshalJSON(enum, b, RoleOwner)
+	return enumUnmarshalJSON(enum, b, roleEnd)
 }
+
+func (role Role) IsValid() bool { return role > roleUndefined && role < roleEnd }
 
 const (
 	roleUndefined Role = iota // undefined
@@ -38,6 +40,7 @@ const (
 	// RoleOwner is the maximum role. Keep new roles under this unless adding something like "god-emperor"
 	// On changing this max value make sure to change enum marshalling call.
 	RoleOwner // owner
+	roleEnd   // not-a-real-role
 )
 
 type RoleHandlerFunc func(w http.ResponseWriter, r *http.Request, rc RequestContext)
@@ -209,9 +212,9 @@ func (d *DevAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func enumUnmarshalJSON[T interface {
-	~int | ~uint | ~uint8
+	~int | ~uint | ~uint8 | ~int64 | ~uint64 // common enum types.
 	String() string
-}](ptr *T, b []byte, maxEnum T) error {
+}](ptr *T, b []byte, maxEnumLim T) error {
 	strq := string(b)
 	bs, err := strconv.Unquote(strq)
 	if err != nil {
@@ -221,7 +224,7 @@ func enumUnmarshalJSON[T interface {
 		return errors.New("cannot unmarshal empty enum string")
 	}
 	var v T = 1
-	for v = 1; v <= maxEnum; v++ {
+	for v = 1; v < maxEnumLim; v++ {
 		str := v.String()
 		if str == bs {
 			*ptr = v

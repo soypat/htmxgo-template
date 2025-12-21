@@ -14,11 +14,12 @@ func _() {
 	_ = x[RoleModerator-3]
 	_ = x[RoleAdmin-4]
 	_ = x[RoleOwner-5]
+	_ = x[roleEnd-6]
 }
 
-const _Role_name = "undefinedexternalusermodadminowner"
+const _Role_name = "undefinedexternalusermodadminownernot-a-real-role"
 
-var _Role_index = [...]uint8{0, 9, 17, 21, 24, 29, 34}
+var _Role_index = [...]uint8{0, 9, 17, 21, 24, 29, 34, 49}
 
 func (i Role) String() string {
 	idx := int(i) - 0

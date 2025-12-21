@@ -97,17 +97,6 @@ func (sv *Server) Init(flags Flags) (err error) {
 
 // MIDDLEWARE.
 
-// RequireAuth is middleware that redirects to login if not authenticated.
-func (sv *Server) RequireAuth(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if sv.auth.GetEmail(r) == "" {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
-		next.ServeHTTP(w, r)
-	}
-}
-
 func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handler RoleHandlerFunc) {
 	sv.router.HandleFunc(parentPattern, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -118,7 +107,7 @@ func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handl
 			return
 		}
 		rc := sv.RenderContext(w, r)
-		if !rc.User.HasClearance(requiredClearance) {
+		if !rc.User.Role.IsValid() || !rc.User.HasClearance(requiredClearance) {
 			http.NotFound(w, r)
 			return
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/mail"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,13 @@ func (u *User) HasClearance(requiredClearance Role) bool {
 }
 
 func (u *User) Validate() error {
+	if !u.Role.IsValid() {
+		return errors.New("invalid user role")
+	} else if u.Provider != "nowhere" && u.Provider != "google" {
+		return errors.New("invalid user provider")
+	} else if u.CreatedAt.IsZero() || u.UpdatedAt.IsZero() {
+		return errors.New("invalid DB CRUD time")
+	}
 	var z uuid.UUID
 	if u.ID == z {
 		return errors.New("UUID not set")
@@ -46,7 +54,9 @@ func (u *User) Validate() error {
 }
 
 type Store struct {
-	db *bbolt.DB
+	db          *bbolt.DB
+	mailCacheMu sync.Mutex
+	mailCache   map[string]uuid.UUID
 }
 
 func (db *Store) Open(filename string) error {
@@ -55,6 +65,14 @@ func (db *Store) Open(filename string) error {
 	if err != nil {
 		return err
 	}
+	db.mailCacheMu.Lock()
+	if db.mailCache == nil {
+		db.mailCache = make(map[string]uuid.UUID)
+	} else {
+		clear(db.mailCache)
+	}
+	db.mailCacheMu.Unlock()
+
 	err = bdb.Update(func(tx *bbolt.Tx) error {
 		for _, bucket := range [][]byte{bucketUsers} {
 			if tx.Bucket(bucket) == nil {
@@ -103,13 +121,19 @@ func (db *Store) UserByEmail(dst *User, email string) error {
 	if err != nil {
 		return err
 	}
+	db.mailCacheMu.Lock()
+	id, inCache := db.mailCache[email]
+	db.mailCacheMu.Unlock()
+	if inCache {
+		return db.UserByUUID(dst, id)
+	}
 	emailb := []byte(email)
 	return db.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketUsers)
 		err = b.ForEach(func(k, v []byte) error {
 			// Quite inefficient for several users, prefer searching users by UUID until adding a cache.
 			if bytes.Contains(v, emailb) {
-				err = json.NewDecoder(bytes.NewReader(v)).Decode(dst)
+				err = json.Unmarshal(v, dst)
 				if dst.Email == email {
 					return errEndIter
 				}
@@ -117,6 +141,9 @@ func (db *Store) UserByEmail(dst *User, email string) error {
 			return nil
 		})
 		if err == errEndIter {
+			db.mailCacheMu.Lock()
+			db.mailCache[email] = dst.ID
+			db.mailCacheMu.Unlock()
 			return nil
 		}
 		return errors.New("email not found")
@@ -140,6 +167,9 @@ func (db *Store) UserCreate(newUser User) error {
 		if err != nil {
 			panic(err) // Unreachable in theory.
 		}
+		db.mailCacheMu.Lock()
+		db.mailCache[newUser.Email] = newUser.ID
+		db.mailCacheMu.Unlock()
 		return b.Put(newUser.ID[:], data)
 	})
 }
@@ -161,6 +191,25 @@ func (db *Store) UserUpdate(updatedUser User) error {
 			panic(err) // Unreachable in theory.
 		}
 		return b.Put(updatedUser.ID[:], data)
+	})
+}
+
+func (db *Store) UserDelete(id uuid.UUID) error {
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketUsers)
+		data := b.Get(id[:])
+		if data == nil {
+			return errors.New("could not find user to delete")
+		}
+		var usr User
+		err := json.Unmarshal(data, &usr)
+		if err != nil {
+			return err
+		}
+		db.mailCacheMu.Lock()
+		delete(db.mailCache, usr.Email)
+		db.mailCacheMu.Unlock()
+		return b.Delete(id[:])
 	})
 }
 
