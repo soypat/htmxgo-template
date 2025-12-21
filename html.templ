@@ -1,0 +1,452 @@
+package main
+
+import (
+	"strconv"
+	"time"
+)
+
+templ landingPage(rc RenderContext) {
+	<h2>Welcome { rc.User.Email }!</h2>
+}
+
+templ usersPage(users []User) {
+	<div class="section">
+		<div class="section-header">
+			<h2>User Management</h2>
+			<span class="status-badge status-running">{ strconv.Itoa(len(users)) } users</span>
+		</div>
+		<div class="card">
+			if len(users) == 0 {
+				<p>No users found.</p>
+			} else {
+				<table class="user-table">
+					<thead>
+						<tr>
+							<th>Email</th>
+							<th>Provider</th>
+							<th>User ID</th>
+							<th>Created</th>
+							<th>Updated</th>
+							<th>Actions</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, user := range users {
+							<tr>
+								<td class="user-email">{ user.Email }</td>
+								<td>
+									<span class={ "provider-badge", "provider-" + user.Provider }>{ user.Provider }</span>
+								</td>
+								<td class="user-id">{ user.ID.String()[:8] }...</td>
+								<td class="user-time">
+									@compPrettyDiffTime(time.Now(), user.CreatedAt)
+								</td>
+								<td class="user-time">
+									@compPrettyDiffTime(time.Now(), user.UpdatedAt)
+								</td>
+								<td>
+									@sendToastButton(user.Email)
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+	</div>
+}
+
+templ sendToastButton(email string) {
+	<div class="toast-action">
+		<button
+			class="btn btn-primary btn-sm"
+			onclick="this.parentElement.querySelector('.toast-form').style.display='flex'; this.style.display='none';"
+		>
+			Send Toast
+		</button>
+		<form
+			class="toast-form"
+			style="display: none;"
+			hx-post="/users/send-toast"
+			hx-swap="none"
+			hx-on::after-request="this.reset(); this.style.display='none'; this.previousElementSibling.style.display='inline-block';"
+		>
+			<input type="hidden" name="email" value={ email }/>
+			<input type="text" name="message" placeholder="Toast message..." required class="toast-input"/>
+			<select name="type" class="toast-type-select">
+				<option value="info">Info</option>
+				<option value="success">Success</option>
+				<option value="warn">Warn</option>
+				<option value="error">Error</option>
+				<option value="debug">Debug</option>
+			</select>
+			<button type="submit" class="btn btn-success btn-sm">Send</button>
+			<button
+				type="button"
+				class="btn btn-secondary btn-sm"
+				onclick="this.parentElement.style.display='none'; this.parentElement.previousElementSibling.style.display='inline-block';"
+			>
+				Cancel
+			</button>
+		</form>
+	</div>
+}
+
+templ toastSent() {
+	<div class="toast-sent">
+		<span class="status-badge status-finished">Sent!</span>
+	</div>
+}
+
+templ page(component templ.Component, rc RenderContext) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			@defaultHead()
+		</head>
+		<body hx-ext="sse" sse-connect="/sse">
+			<nav>
+				@activeLink("/", "Home", rc.Page == pageLanding)
+				@activeLink("/users", "Users", rc.Page == pageUsers)
+				<span class="spacer"></span>
+				<span class="email">{ rc.User.Email }</span>
+				<a href="/logout">Logout</a>
+			</nav>
+			<div class="container">
+				@component
+			</div>
+			<footer class="container">
+				<div>
+					<small>&copy; { strconv.Itoa(time.Now().Year()) } Gemplhtmxo. All rights reserved.</small>
+				</div>
+				<div>
+					<p><em>The world in the palm of <strong>your</strong> hand.</em></p>
+				</div>
+			</footer>
+			<div class="toast-container" sse-swap="toast" hx-swap="beforeend"></div>
+			<script>
+        // Auto-remove toasts after 5 seconds
+        document.body.addEventListener('htmx:sseMessage', function(e) {
+            setTimeout(function() {
+                var toasts = document.querySelectorAll('.toast');
+                if (toasts.length > 0) {
+                    toasts[0].remove();
+                }
+            }, 5000);
+        });
+
+        // Handle SSE connection errors gracefully - disable SSE to prevent infinite retries
+        document.body.addEventListener('htmx:sseError', function(e) {
+            console.warn('SSE connection failed, disabling reconnect');
+            document.body.removeAttribute('hx-ext');
+            document.body.removeAttribute('sse-connect');
+        });
+    </script>
+		</body>
+	</html>
+}
+
+templ activeLink(href string, Name string, active bool) {
+	if active {
+		<a href={ href } class="active">{ Name }</a>
+	} else {
+		<a href={ href }>{ Name }</a>
+	}
+}
+
+templ defaultHead() {
+	<meta charset="utf-8"/>
+	<meta http-equiv="X-UA-Compatible" content="IE=edge"/>
+	<title>Templ v HTMX</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1"/>
+	<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+	<script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
+	@pageStyle()
+}
+
+templ pageStyle() {
+	<style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        nav {
+            background: #2c3e50;
+            padding: 15px 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        nav a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+        }
+        nav a:hover, nav a.active {
+            background: #34495e;
+        }
+        nav .spacer { flex: 1; }
+        nav .email { color: #bdc3c7; font-size: 14px; }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1, h2, h3 { margin-top: 0; }
+
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+        }
+        .btn-primary { background: #3498db; color: white; }
+        .btn-primary:hover { background: #2980b9; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-success:hover { background: #229954; }
+        .btn-danger { background: #e74c3c; color: white; }
+        .btn-danger:hover { background: #c0392b; }
+        .btn-secondary { background: #95a5a6; color: white; }
+        .btn-secondary:hover { background: #7f8c8d; }
+
+        input[type="text"], input[type="file"], textarea, select {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 100%;
+        }
+        textarea { font-family: monospace; resize: vertical; }
+
+        .file-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            gap: 10px;
+        }
+        .file-item:last-child { border-bottom: none; }
+        .file-name { flex: 1; font-family: monospace; }
+        .file-size { color: #999; font-size: 12px; }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status-pending { background: #f1c40f; color: #333; }
+        .status-running { background: #3498db; color: white; }
+        .status-finished { background: #27ae60; color: white; }
+        .status-error { background: #e74c3c; color: white; }
+        .status-cancelled { background: #95a5a6; color: white; }
+
+        .output-box {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .toast-container {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .toast {
+            padding: 15px 20px;
+            border-radius: 4px;
+            color: white;
+            animation: slideIn 0.3s ease;
+        }
+        .toast-INFO { background: #3498db; }
+        .toast-SUCCESS { background: #27ae60; }
+        .toast-ERROR { background: #e74c3c; }
+        .toast-WARN { background: #f39c12; }
+        .toast-DEBUG { background: #913f94; }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .grid { display: grid; gap: 20px; }
+        .grid-2 { grid-template-columns: 1fr 1fr; }
+        @media (max-width: 768px) {
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+
+        .job-list { list-style: none; padding: 0; }
+        .job-item {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            gap: 15px;
+        }
+        .job-item:hover { background: #f9f9f9; }
+        .job-id { font-family: monospace; color: #666; }
+        .job-name { flex: 1; }
+        .job-time { color: #999; font-size: 12px; }
+
+        .input-list { list-style: none; padding: 0; }
+        .input-item {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            gap: 15px;
+        }
+        .input-item:hover { background: #f9f9f9; }
+        .input-name { flex: 1; }
+        .input-count { color: #999; font-size: 12px; }
+
+        .default-badge {
+            background: #9b59b6;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+        }
+
+        .section { margin-bottom: 30px; }
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
+
+        .flex { display: flex; gap: 10px; align-items: center; }
+        .flex-wrap { flex-wrap: wrap; }
+
+        .user-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .user-table th, .user-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .user-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #555;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .user-table tr:hover { background: #f9f9f9; }
+        .user-email { font-weight: 500; }
+        .user-id { font-family: monospace; color: #666; font-size: 13px; }
+        .user-time { color: #888; font-size: 13px; }
+
+        .provider-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .provider-google { background: #e8f0fe; color: #1a73e8; }
+        .provider-github { background: #f0f0f0; color: #24292e; }
+        .provider-microsoft { background: #fff4e5; color: #d83b01; }
+
+        [data-tooltip] {
+            position: relative;
+            cursor: help;
+        }
+        [data-tooltip]::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 6px 10px;
+            background: #333;
+            color: white;
+            font-size: 12px;
+            font-style: normal;
+            border-radius: 4px;
+            white-space: nowrap;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s, visibility 0.2s;
+            z-index: 100;
+            margin-bottom: 5px;
+        }
+        [data-tooltip]:hover::after {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        .toast-action {
+            min-width: 200px;
+        }
+        .toast-form {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+        .toast-input {
+            width: 120px !important;
+            padding: 5px 8px !important;
+            font-size: 12px !important;
+        }
+        .toast-type-select {
+            width: 80px !important;
+            padding: 5px !important;
+            font-size: 12px !important;
+        }
+        .toast-sent {
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+    </style>
+}
+
+templ compPrettyDiffTime(now, createdAt time.Time) {
+	<em data-tooltip={ createdAt.Format("2006 Jan 02 15:04") }>{ fmtSeconds(now.Sub(createdAt).Seconds()) } ago</em>
+}
