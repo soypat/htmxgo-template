@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -28,6 +27,7 @@ import (
 // events (not request-specific), and showing them across all tabs improves UX.
 func (sv *Server) handleSSE() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		connID := uuid.New().String()[:8]
 		email := sv.auth.GetEmail(r)
 		if email == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -46,8 +46,31 @@ func (sv *Server) handleSSE() http.HandlerFunc {
 
 		ch := sv.toasts.Subscribe(email)
 		defer sv.toasts.Unsubscribe(email, ch)
-		ctx, cancel := context.WithTimeout(r.Context(), 24*time.Hour)
-		defer cancel()
+
+		slog.Debug("sse connected", slog.String("conn", connID), slog.String("email", email))
+		defer slog.Debug("sse disconnected", slog.String("conn", connID), slog.String("email", email))
+
+		// Heartbeat detects dead connections by forcing periodic writes.
+		//
+		// Why this is necessary:
+		// - SSE connections do NOT persist between page loads - browser closes them on navigation
+		// - However, Go's HTTP server only detects client disconnect when a WRITE fails
+		// - TCP writes go to kernel buffer and "succeed" even if client is gone
+		// - Failure is only detected after TCP retransmit timeout (30+ seconds on Linux)
+		// - These "zombie" handlers consume the browser's 6-connection limit, blocking page loads
+		//
+		// Solution: Send heartbeats frequently. If client is gone, write eventually fails.
+		// We send one immediately on connect to detect stale connections ASAP.
+		heartbeat := time.NewTicker(15 * time.Second)
+		defer heartbeat.Stop()
+
+		// Immediate heartbeat on connect - critical for fast stale connection detection
+		if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
+			slog.Debug("sse initial write failed", slog.String("conn", connID), slog.String("err", err.Error()))
+			return
+		}
+		flusher.Flush()
+
 		for {
 			select {
 			case toast := <-ch:
@@ -55,13 +78,26 @@ func (sv *Server) handleSSE() http.HandlerFunc {
 				if toast.Level != toastLevelSuccess {
 					lvlstr = toast.Level.String()
 				}
-				fmt.Fprintf(w, "event: toast\ndata: <div class=\"toast toast-%s\" id=\"toast-%s\">%s</div>\n\n",
+				_, err := fmt.Fprintf(w, "event: toast\ndata: <div class=\"toast toast-%s\" id=\"toast-%s\">%s</div>\n\n",
 					html.EscapeString(lvlstr),
 					html.EscapeString(toast.ID),
 					html.EscapeString(toast.Message))
+				if err != nil {
+					slog.Debug("sse write failed", slog.String("conn", connID), slog.String("err", err.Error()))
+					return
+				}
 				flusher.Flush()
-			case <-ctx.Done():
-				slog.Warn("sse too long duration", slog.String("email", email), slog.String("err", ctx.Err().Error()))
+
+			case <-heartbeat.C:
+				_, err := fmt.Fprintf(w, ": heartbeat\n\n")
+				if err != nil {
+					slog.Debug("sse heartbeat failed", slog.String("conn", connID), slog.String("err", err.Error()))
+					return
+				}
+				flusher.Flush()
+
+			case <-r.Context().Done():
+				slog.Debug("sse context done", slog.String("conn", connID), slog.String("err", r.Context().Err().Error()))
 				return
 			}
 		}

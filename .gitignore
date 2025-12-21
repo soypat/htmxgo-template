@@ -16,6 +16,13 @@
 
 # Output Templ template files. Generated from *.templ files.
 *_templ.go
+# Output databases.
+*.bbolt
+*.db
+*.sqlite
+# Output binary on `go build .`
+/gohtmx-template
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 

@@ -135,11 +135,25 @@ templ page(component templ.Component, rc RenderContext) {
             }, 5000);
         });
 
-        // Handle SSE connection errors gracefully - disable SSE to prevent infinite retries
+        // Capture EventSource from HTMX SSE extension for manual control
+        // This is required because browsers do not automatically close SSE connections
+        // when navigating away from page. And if one fills up the SSE available connections which
+        // is capped at 6 for most browsers one can hang the page indefinetely which leads to terrible UX.
+        // To understand why this is VERY necessary remove this code and quickly navigate between 7 different page loads.
+        var sseSource = null;
+        closeSSE = function() { if (sseSource) { sseSource.close(); sseSource = null; } }
+        document.body.addEventListener('htmx:sseOpen', function(e) {
+            sseSource = e.detail.source;
+        });
+        // Handle SSE connection errors - close and prevent retries
         document.body.addEventListener('htmx:sseError', function(e) {
-            console.warn('SSE connection failed, disabling reconnect');
-            document.body.removeAttribute('hx-ext');
-            document.body.removeAttribute('sse-connect');
+            console.warn('SSE connection failed');
+            closeSSE()
+        });
+        // Close SSE connection explicitly on navigation.
+        // Removing attributes does NOT close the EventSource - must call .close()
+        window.addEventListener('pagehide', function() {
+            closeSSE()
         });
     </script>
 		</body>
