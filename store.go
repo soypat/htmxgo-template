@@ -24,23 +24,65 @@ type User struct {
 	ID    uuid.UUID `json:"uuid"`
 	Role  Role      `json:"role"`
 	// Provider is the OAuth provider for this user's email.
-	Provider  string    `json:"provider"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Provider   string      `json:"provider"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+	Workspaces []uuid.UUID `json:"workspaces"`
+}
+
+type Workspace struct {
+	ID        uuid.UUID   `json:"uuid"`
+	Members   []Member    `json:"members"`
+	Documents []uuid.UUID `json:"documents"`
+}
+
+type Member struct {
+	UserID        uuid.UUID `json:"user_uuid"`
+	WorkspaceRole Role      `json:"workspace_role"`
+}
+
+type DocumentView struct {
+	ID    uuid.UUID `json:"uuid"`
+	Title string    `json:"title"`
+	// Content field is omitted. will not be unmarshalled.
+}
+
+type Document struct {
+	ID      uuid.UUID `json:"uuid"`
+	Title   string    `json:"title"`
+	Content []byte    `json:"content"`
+}
+
+func (doc *Document) Validate() (err error) {
+	const maxDocumentSize = 64
+	if err = validateID(doc.ID); err != nil {
+		return err
+	} else if len(doc.Title) > maxDocumentSize {
+		return fmt.Errorf("document title exceeds limit by %d characters", maxDocumentSize-len(doc.Title))
+	} else if err = validateText(doc.Content); err != nil {
+		return fmt.Errorf("document content: %s", err)
+	} else if err = validateText([]byte(doc.Title)); err != nil {
+		return fmt.Errorf("document title: %s", err)
+	}
+	return nil
+}
+
+func (m *Member) HasClearance(requiredClearance Role) bool {
+	return m.WorkspaceRole >= requiredClearance
 }
 
 func (u *User) HasClearance(requiredClearance Role) bool {
 	return u.Role >= requiredClearance
 }
+
 func (u *User) validateForUpdate() error {
+	if err := validateID(u.ID); err != nil {
+		return err
+	}
 	if !u.Role.IsValid() {
 		return errors.New("invalid user role")
 	} else if u.Provider != "nowhere" && u.Provider != "google" {
 		return errors.New("invalid user provider")
-	}
-	var z uuid.UUID
-	if u.ID == z {
-		return errors.New("UUID not set")
 	} else if u.Provider == "" {
 		return errors.New("provider not set")
 	}
@@ -50,6 +92,7 @@ func (u *User) validateForUpdate() error {
 	}
 	return nil
 }
+
 func (u *User) Validate() error {
 	if u.CreatedAt.IsZero() || u.UpdatedAt.IsZero() {
 		return errors.New("invalid DB CRUD time")
@@ -113,17 +156,7 @@ func (db *Store) Close() error {
 }
 
 func (db *Store) UserByUUID(dst *User, id uuid.UUID) error {
-	if id == (uuid.UUID{}) {
-		return errors.New("zero UUID")
-	}
-	return db.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketUsers)
-		data := b.Get(id[:])
-		if data == nil {
-			return errors.New("user not found")
-		}
-		return json.NewDecoder(bytes.NewReader(data)).Decode(dst)
-	})
+	return db.read(id, dst, bucketUsers)
 }
 
 func (db *Store) UserByEmail(dst *User, email string) error {
@@ -158,80 +191,55 @@ func (db *Store) UserByEmail(dst *User, email string) error {
 }
 
 func (db *Store) UserCreate(newUser User) error {
-	err := newUser.validateForUpdate()
-	if err != nil {
+	if err := newUser.validateForUpdate(); err != nil {
 		return err
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketUsers)
-		data := b.Get(newUser.ID[:])
-		if data != nil {
-			return errors.New("user already exists")
-		}
-		newUser.CreatedAt = time.Now()
-		newUser.UpdatedAt = newUser.CreatedAt
-		data, err := json.Marshal(newUser)
-		if err != nil {
-			panic(err) // Unreachable in theory.
-		}
-		db.cacheMail(newUser.Email, newUser.ID)
-		return b.Put(newUser.ID[:], data)
-	})
+	newUser.CreatedAt = time.Now()
+	newUser.UpdatedAt = newUser.CreatedAt
+	if err := db.create(newUser.ID, newUser, bucketUsers); err != nil {
+		return err
+	}
+	db.cacheMail(newUser.Email, newUser.ID)
+	return nil
 }
 
 func (db *Store) UserUpdate(updatedUser User) error {
-	err := updatedUser.validateForUpdate()
-	if err != nil {
+	if err := updatedUser.validateForUpdate(); err != nil {
 		return err
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketUsers)
-		data := b.Get(updatedUser.ID[:])
-		if data == nil {
-			return errors.New("could not find user to update")
-		}
-		var existing User
-		json.Unmarshal(data, &existing)
-		if existing.Email != updatedUser.Email {
-			// Email change cache update.
-			db.mailCacheMu.Lock()
-			delete(db.mailCache, existing.Email)
-			db.mailCache[updatedUser.Email] = updatedUser.ID
-			db.mailCacheMu.Unlock()
-		}
-		updatedUser.CreatedAt = existing.CreatedAt
-		updatedUser.UpdatedAt = time.Now()
-		data, err := json.Marshal(updatedUser)
-		if err != nil {
-			panic(err) // Unreachable in theory.
-		}
-		fmt.Println("update old user", existing, "with new", updatedUser)
-		return b.Put(updatedUser.ID[:], data)
-	})
+	var existing User
+	if err := db.read(updatedUser.ID, &existing, bucketUsers); err != nil {
+		return err
+	}
+	// Handle email change in cache.
+	if existing.Email != updatedUser.Email {
+		db.mailCacheMu.Lock()
+		delete(db.mailCache, existing.Email)
+		db.mailCache[updatedUser.Email] = updatedUser.ID
+		db.mailCacheMu.Unlock()
+	}
+	updatedUser.CreatedAt = existing.CreatedAt
+	updatedUser.UpdatedAt = time.Now()
+	return db.update(updatedUser.ID, updatedUser, bucketUsers)
 }
 
 func (db *Store) UserDelete(id uuid.UUID) error {
-	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketUsers)
-		data := b.Get(id[:])
-		if data == nil {
-			return errors.New("could not find user to delete")
-		}
-		var usr User
-		err := json.Unmarshal(data, &usr)
-		if err != nil {
-			return err
-		}
-		db.mailCacheMu.Lock()
-		delete(db.mailCache, usr.Email)
-		db.mailCacheMu.Unlock()
-		return b.Delete(id[:])
-	})
+	var usr User
+	if err := db.read(id, &usr, bucketUsers); err != nil {
+		return err
+	}
+	if err := db.delete(id, bucketUsers); err != nil {
+		return err
+	}
+	db.mailCacheMu.Lock()
+	delete(db.mailCache, usr.Email)
+	db.mailCacheMu.Unlock()
+	return nil
 }
 
 func (db *Store) Users(cb func(dst *User) error) error {
 	var usr User
-	return db.db.View(func(tx *bbolt.Tx) error {
+	err := db.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketUsers)
 		return b.ForEach(func(k, v []byte) error {
 			err := json.NewDecoder(bytes.NewReader(v)).Decode(&usr)
@@ -241,4 +249,111 @@ func (db *Store) Users(cb func(dst *User) error) error {
 			return cb(&usr)
 		})
 	})
+	if err == errEndIter {
+		return nil
+	}
+	return err
+}
+
+// Low Level CRUD with JSON storage scheme.
+// API can be extended to have vararg buckets ...[]byte argument for bucket nesting.
+
+func (db *Store) create(id uuid.UUID, object any, bucket []byte) error {
+	if err := validateID(id); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucket)
+		data := b.Get(id[:])
+		if data != nil {
+			return fmt.Errorf("%T already exists", object)
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			panic(err) // Unreachable in theory.
+		}
+		return b.Put(id[:], data)
+	})
+}
+
+func (db *Store) read(id uuid.UUID, ptrToObject any, bucket []byte) error {
+	if err := validateID(id); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucket)
+		data := b.Get(id[:])
+		if data == nil {
+			return fmt.Errorf("%T does not exist", ptrToObject)
+		}
+		return json.Unmarshal(data, ptrToObject)
+	})
+}
+
+func (db *Store) update(id uuid.UUID, object any, bucket []byte) error {
+	if err := validateID(id); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucket)
+		data := b.Get(id[:])
+		if data == nil {
+			return fmt.Errorf("%T does not exist to update", object)
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			panic(err) // Unreachable in theory.
+		}
+		return b.Put(id[:], data)
+	})
+}
+
+func (db *Store) delete(id uuid.UUID, bucket []byte) error {
+	if err := validateID(id); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucket)
+		data := b.Get(id[:])
+		if data == nil {
+			return errors.New("for deletion does not exist")
+		}
+		return b.Delete(id[:])
+	})
+}
+
+func validateText(data []byte) error {
+	const (
+		_ = 1 << (iota * 10)
+		kB
+		MB
+	)
+	const maxTextSize = 10 * MB
+	if len(data) > 5*MB {
+		return fmt.Errorf("text size exceeds max database size of %d megabytes", maxTextSize/MB)
+	} else if idx := unprintableIndex(data); idx >= 0 {
+		return fmt.Errorf("text contains unprintable character at %d: %q", idx, data[idx])
+	}
+	return nil
+}
+
+// isPrintableASCII checks if all bytes are printable ASCII (0x20-0x7E) or whitespace (tab, newline, carriage return).
+func unprintableIndex(data []byte) int {
+	for i, b := range data {
+		if b >= 0x20 && b <= 0x7E {
+			continue // printable ASCII
+		}
+		if b == '\t' || b == '\n' || b == '\r' {
+			continue // whitespace
+		}
+		return i
+	}
+	return -1
+}
+
+func validateID(id uuid.UUID) error {
+	if id == (uuid.UUID{}) {
+		return errors.New("zero UUID")
+	}
+	return nil
 }
