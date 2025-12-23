@@ -100,6 +100,121 @@ templ toastSent() {
 	</div>
 }
 
+templ workspacesPage(rc RequestContext, workspaces []Workspace) {
+	<div class="section">
+		<div class="section-header">
+			<h2>My Workspaces</h2>
+			<div class="flex">
+				<span class="status-badge status-running">{ strconv.Itoa(len(workspaces)) } workspaces</span>
+				<form hx-post="/workspaces" hx-swap="none">
+					<button type="submit" class="btn btn-primary btn-sm">New Workspace</button>
+				</form>
+			</div>
+		</div>
+		<div class="card">
+			if len(workspaces) == 0 {
+				<p>No workspaces found. Create one to get started!</p>
+			} else {
+				<ul class="workspace-list">
+					for _, ws := range workspaces {
+						<li class="workspace-item">
+							<div class="workspace-link">
+								<span class="workspace-id">{ ws.ID.String()[:8] }...</span>
+								<span class="workspace-meta">
+									{ strconv.Itoa(len(ws.Documents)) } docs &middot; { strconv.Itoa(len(ws.Members)) } members
+								</span>
+								<span class="workspace-time">
+									@compPrettyDiffTime(time.Now(), ws.CreatedAt)
+								</span>
+								if rc.ActiveWorkspace != nil && rc.ActiveWorkspace.ID == ws.ID {
+									<span class="status-badge status-finished">Active</span>
+								} else {
+									<form hx-post={ "/workspaces/" + ws.ID.String() + "/activate" } hx-swap="none">
+										<button type="submit" class="btn btn-success btn-sm">Activate</button>
+									</form>
+								}
+							</div>
+						</li>
+					}
+				</ul>
+			}
+		</div>
+	</div>
+}
+
+templ documentsPage(rc RequestContext, docs []DocumentView) {
+	<div class="section">
+		<div class="section-header">
+			<h2>Documents</h2>
+			<div class="flex">
+				<span class="status-badge status-running">{ strconv.Itoa(len(docs)) } documents</span>
+				<button
+					class="btn btn-primary btn-sm"
+					onclick="document.getElementById('upload-form').style.display='block'; this.style.display='none';"
+				>
+					Upload Document
+				</button>
+			</div>
+		</div>
+		<div class="card">
+			<form
+				id="upload-form"
+				style="display: none;"
+				class="upload-form"
+				hx-post="/documents"
+				hx-encoding="multipart/form-data"
+				hx-swap="none"
+				hx-on::after-request="location.reload();"
+			>
+				<input type="text" name="title" placeholder="Document title..." required/>
+				<input type="file" name="file" required/>
+				<div class="flex">
+					<button type="submit" class="btn btn-success btn-sm">Upload</button>
+					<button
+						type="button"
+						class="btn btn-secondary btn-sm"
+						onclick="this.closest('form').style.display='none'; document.querySelector('.section-header .btn').style.display='inline-block';"
+					>
+						Cancel
+					</button>
+				</div>
+			</form>
+			if len(docs) == 0 {
+				<p>No documents in this workspace. Upload one to get started!</p>
+			} else {
+				<ul class="document-list">
+					for _, doc := range docs {
+						<li class="document-item">
+							<a href={ templ.SafeURL("/documents/" + doc.ID.String()) } class="document-link">
+								<span class="document-title">{ doc.Title }</span>
+								<span class="document-time">
+									@compPrettyDiffTime(time.Now(), doc.UpdatedAt)
+								</span>
+							</a>
+						</li>
+					}
+				</ul>
+			}
+		</div>
+	</div>
+}
+
+templ documentPage(rc RequestContext, doc Document) {
+	<div class="section">
+		<div class="section-header">
+			<h2>{ doc.Title }</h2>
+			<a href="/documents" class="btn btn-secondary btn-sm">Back to Documents</a>
+		</div>
+		<div class="card">
+			<div class="document-meta">
+				<span>Created: { doc.CreatedAt.Format("2006-01-02 15:04") }</span>
+				<span>Updated: { doc.UpdatedAt.Format("2006-01-02 15:04") }</span>
+			</div>
+			<pre class="document-content">{ string(doc.Content) }</pre>
+		</div>
+	</div>
+}
+
 templ page(component templ.Component, rc RequestContext) {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -109,6 +224,10 @@ templ page(component templ.Component, rc RequestContext) {
 		<body hx-ext="sse" sse-connect="/sse">
 			<nav>
 				@activeLink("/", "Home", rc.Page == pageLanding)
+				@activeLink("/workspaces", "Workspaces", rc.Page == pageWorkspaces)
+				if rc.ActiveWorkspace != nil {
+					@activeLink("/documents", "Documents", rc.Page == pageDocuments)
+				}
 				if rc.User.HasClearance(RoleAdmin) {
 					@activeLink("/users", "Users", rc.Page == pageUsers)
 				}
@@ -461,6 +580,124 @@ templ pageStyle() {
         @keyframes fadeIn {
             from { opacity: 0; }
             to { opacity: 1; }
+        }
+
+        /* Workspace styles */
+        .workspace-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .workspace-item {
+            border-bottom: 1px solid #eee;
+        }
+        .workspace-item:last-child { border-bottom: none; }
+        .workspace-link {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            text-decoration: none;
+            color: inherit;
+            gap: 15px;
+        }
+        .workspace-link:hover { background: #f9f9f9; }
+        .workspace-id {
+            font-family: monospace;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        .workspace-meta { color: #666; font-size: 13px; flex: 1; }
+        .workspace-time { color: #999; font-size: 12px; }
+
+        .workspace-layout {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+        }
+        @media (max-width: 900px) {
+            .workspace-layout { grid-template-columns: 1fr; }
+        }
+        .workspace-main { min-width: 0; }
+        .workspace-sidebar { min-width: 0; }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .card-header h3 { margin: 0; }
+
+        .upload-form {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .upload-form input { margin-bottom: 10px; }
+
+        .document-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .document-item {
+            border-bottom: 1px solid #eee;
+        }
+        .document-item:last-child { border-bottom: none; }
+        .document-link {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            text-decoration: none;
+            color: inherit;
+        }
+        .document-link:hover { color: #3498db; }
+        .document-title { font-weight: 500; }
+        .document-time { color: #999; font-size: 12px; }
+
+        .member-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .member-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .member-item:last-child { border-bottom: none; }
+        .member-email { font-size: 13px; }
+        .member-role {
+            font-size: 11px;
+            background: #e8f0fe;
+            color: #1a73e8;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .document-meta {
+            display: flex;
+            gap: 20px;
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 15px;
+        }
+        .document-content {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 600px;
+            overflow-y: auto;
+            margin: 0;
         }
     </style>
 }

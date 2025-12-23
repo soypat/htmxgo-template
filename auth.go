@@ -30,6 +30,14 @@ func (enum *Role) UnmarshalJSON(b []byte) error {
 
 func (role Role) IsValid() bool { return role > roleUndefined && role < roleEnd }
 
+// Canon sanitizes role and ensures if invalid is set to zero and fails all clearance checks.
+func (role Role) Canon() Role {
+	if role.IsValid() {
+		return role
+	}
+	return 0
+}
+
 const (
 	roleUndefined Role = iota // undefined
 	RoleExternal              // external

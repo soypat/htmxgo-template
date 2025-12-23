@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -18,8 +19,11 @@ import (
 // Stores generic information about the request that is commonly used in
 // frontend rendering or within API endpoint logic.
 type RequestContext struct {
-	User User
-	Page Page
+	User            User
+	Page            Page
+	ActiveWorkspace *Workspace
+	WorkspaceRole   Role
+	Now             time.Time
 }
 
 // Page state. Used to highlight current page.
@@ -29,7 +33,11 @@ const (
 	pageUndefined = iota
 	pageLanding
 	pageUsers
+	pageWorkspaces
+	pageDocuments
 )
+
+const activeWorkspaceCookie = "active_workspace"
 
 type Server struct {
 	// Inspired by Mat Ryer's post on writing HTTP services:
@@ -75,10 +83,18 @@ func (sv *Server) Init(flags Flags) (err error) {
 	if devrole.IsValid() {
 		const devEmail = "dev@example.com"
 		usr := User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: devrole}
-		sv.db.UserCreate(usr)
-		err = sv.db.UserUpdate(usr)
+		err = sv.db.UserCreate(usr)
 		if err != nil {
-			return err
+			// If user exists then get user and renew role.
+			err = sv.db.UserByEmail(&usr, devEmail)
+			if err != nil {
+				return err
+			}
+			usr.Role = devrole
+			err = sv.db.UserUpdate(usr)
+			if err != nil {
+				return err
+			}
 		}
 		sv.auth = &DevAuth{Email: devEmail}
 		slog.Warn("developer-mode")
@@ -94,12 +110,25 @@ func (sv *Server) Init(flags Flags) (err error) {
 
 	sv.router = http.NewServeMux()
 	sv.HandleFuncNoAuth("/", sv.handleLanding())
-	sv.HandleFunc(RoleAdmin, "/users", sv.handleUsers())
-	sv.HandleFunc(RoleAdmin, "/users/send-toast", sv.handleSendUserToast())
+	sv.HandleFuncNoWorkspace(RoleAdmin, "GET /users", sv.handleUsers())
+	sv.HandleFuncNoWorkspace(RoleAdmin, "POST /users/send-toast", sv.handleSendUserToast())
+
+	// Workspace management (no active workspace required).
+	sv.HandleFuncNoWorkspace(RoleUser, "GET /workspaces", sv.handleWorkspaces())
+	sv.HandleFuncNoWorkspace(RoleUser, "POST /workspaces", sv.handleCreateWorkspace())
+	sv.HandleFuncNoWorkspace(RoleUser, "POST /workspaces/{id}/activate", sv.handleActivateWorkspace())
+	sv.HandleFuncNoWorkspace(RoleAdmin, "DELETE /workspaces/{id}", sv.handleDeleteWorkspace())
+
+	// Document routes (active workspace required).
+	sv.HandleFunc(RoleUser, "GET /documents", sv.handleDocuments())
+	sv.HandleFunc(RoleUser, "POST /documents", sv.handleCreateDocument())
+	sv.HandleFunc(RoleUser, "GET /documents/{id}", sv.handleDocumentView())
+	sv.HandleFunc(RoleUser, "POST /documents/{id}/name", sv.handleUpdateDocumentName())
+
 	if flags.DisableSSE {
-		sv.HandleFunc(RoleUser, "/sse", func(w http.ResponseWriter, r *http.Request, _ RequestContext) { http.Error(w, "sse disabled", 401) })
+		sv.HandleFuncNoWorkspace(RoleUser, "/sse", func(w http.ResponseWriter, r *http.Request, _ RequestContext) { http.Error(w, "sse disabled", 401) })
 	} else {
-		sv.HandleFunc(RoleUser, "/sse", sv.handleSSE())
+		sv.HandleFuncNoWorkspace(RoleUser, "/sse", sv.handleSSE())
 	}
 
 	return nil
@@ -107,6 +136,8 @@ func (sv *Server) Init(flags Flags) (err error) {
 
 // MIDDLEWARE.
 
+// HandleFunc registers a handler that requires authentication, role clearance, AND an active workspace.
+// Use this for routes that operate within the context of a workspace (e.g., /documents).
 func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handler RoleHandlerFunc) {
 	sv.router.HandleFunc(parentPattern, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -117,7 +148,31 @@ func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handl
 			return
 		}
 		rc := sv.RenderContext(w, r)
-		if !rc.User.Role.IsValid() || !rc.User.HasClearance(requiredClearance) {
+		if !rc.User.HasClearance(requiredClearance) {
+			http.NotFound(w, r)
+			return
+		}
+		if rc.ActiveWorkspace == nil {
+			http.Redirect(w, r, "/workspaces", http.StatusSeeOther)
+			return
+		}
+		handler(w, r, rc)
+	})
+}
+
+// HandleFuncNoWorkspace registers a handler that requires authentication and role clearance,
+// but does NOT require an active workspace. Use this for workspace management routes.
+func (sv *Server) HandleFuncNoWorkspace(requiredClearance Role, parentPattern string, handler RoleHandlerFunc) {
+	sv.router.HandleFunc(parentPattern, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
+		}
+		if sv.auth.GetEmail(r) == "" {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		rc := sv.RenderContext(w, r)
+		if !rc.User.HasClearance(requiredClearance) {
 			http.NotFound(w, r)
 			return
 		}
@@ -139,13 +194,67 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 	if err != nil {
 		rc.User = User{}
 	}
+	// Load active workspace from cookie if set.
+	if wsID := sv.getActiveWorkspaceID(r); wsID != uuid.Nil {
+		var ws Workspace
+		if err := sv.db.WorkspaceByUUID(&ws, wsID); err == nil {
+			// Verify user is still a member of this workspace.
+			rc.WorkspaceRole = rc.User.WorkspaceRole(&ws)
+			if rc.WorkspaceRole.IsValid() {
+				rc.ActiveWorkspace = &ws
+			} else {
+				slog.Warn("user-danger", slog.String("mail", rc.User.Email), slog.String("id", rc.User.ID.String()), slog.String("workspaceID", ws.ID.String()))
+				return rc //
+			}
+		}
+	}
 	switch r.RequestURI {
 	case "/":
 		rc.Page = pageLanding
 	case "/users":
 		rc.Page = pageUsers
+	case "/workspaces":
+		rc.Page = pageWorkspaces
+	case "/documents":
+		rc.Page = pageDocuments
 	}
+	rc.Now = time.Now()
 	return rc
+}
+
+// getActiveWorkspaceID returns the workspace UUID from the cookie, or uuid.Nil if not set.
+func (sv *Server) getActiveWorkspaceID(r *http.Request) uuid.UUID {
+	cookie, err := r.Cookie(activeWorkspaceCookie)
+	if err != nil {
+		return uuid.Nil
+	}
+	wsID, err := uuid.Parse(cookie.Value)
+	if err != nil {
+		return uuid.Nil
+	}
+	return wsID
+}
+
+// setActiveWorkspace sets a cookie to store the active workspace ID.
+func (sv *Server) setActiveWorkspace(w http.ResponseWriter, wsID uuid.UUID) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     activeWorkspaceCookie,
+		Value:    wsID.String(),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearActiveWorkspace removes the active workspace cookie.
+func (sv *Server) clearActiveWorkspace(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     activeWorkspaceCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+	})
 }
 
 func (sv *Server) handleLanding() http.HandlerFunc {
@@ -166,6 +275,215 @@ func (sv *Server) handleUsers() RoleHandlerFunc {
 			return
 		}
 		sv.servePage(w, r, usersPage(users), rc)
+	}
+}
+
+func (sv *Server) handleWorkspaces() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		var workspaces []Workspace
+		for _, wsID := range rc.User.Workspaces {
+			var ws Workspace
+			if err := sv.db.WorkspaceByUUID(&ws, wsID); err == nil {
+				workspaces = append(workspaces, ws)
+			}
+		}
+		sv.servePage(w, r, workspacesPage(rc, workspaces), rc)
+	}
+}
+
+func (sv *Server) handleCreateWorkspace() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		ws := Workspace{
+			ID: uuid.New(),
+			Members: []Member{{
+				UserID:        rc.User.ID,
+				JoinedAt:      time.Now(),
+				WorkspaceRole: RoleAdmin,
+			}},
+		}
+		if err := sv.db.WorkspaceCreate(ws); err != nil {
+			sv.error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Add workspace to user's list.
+		rc.User.Workspaces = append(rc.User.Workspaces, ws.ID)
+		if err := sv.db.UserUpdate(rc.User); err != nil {
+			sv.error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Activate the new workspace.
+		sv.setActiveWorkspace(w, ws.ID)
+		w.Header().Set("HX-Redirect", "/documents")
+	}
+}
+
+func (sv *Server) handleActivateWorkspace() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		wsIDStr := r.PathValue("id")
+		wsID, err := uuid.Parse(wsIDStr)
+		if err != nil {
+			sv.error(w, "invalid workspace ID", http.StatusBadRequest)
+			return
+		}
+		// Verify workspace exists and user is a member.
+		var ws Workspace
+		if err := sv.db.WorkspaceByUUID(&ws, wsID); err != nil {
+			sv.error(w, "workspace not found", http.StatusNotFound)
+			return
+		}
+		isMember := false
+		for _, m := range ws.Members {
+			if m.UserID == rc.User.ID {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			sv.error(w, "access denied", http.StatusForbidden)
+			return
+		}
+		sv.setActiveWorkspace(w, wsID)
+		w.Header().Set("HX-Redirect", "/documents")
+	}
+}
+
+func (sv *Server) handleDeleteWorkspace() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		wsIDStr := r.PathValue("id")
+		wsID, err := uuid.Parse(wsIDStr)
+		if err != nil {
+			sv.error(w, "invalid workspace ID", http.StatusBadRequest)
+			return
+		}
+		if err := sv.db.WorkspaceDelete(wsID); err != nil {
+			sv.error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Clear active workspace if it was the deleted one.
+		if rc.ActiveWorkspace != nil && rc.ActiveWorkspace.ID == wsID {
+			sv.clearActiveWorkspace(w)
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// Document handlers (require active workspace via HandleFunc middleware).
+
+func (sv *Server) handleDocuments() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		var docs []DocumentView
+		for _, docID := range rc.ActiveWorkspace.Documents {
+			var doc DocumentView
+			if err := sv.db.DocumentViewByUUID(&doc, docID); err == nil {
+				docs = append(docs, doc)
+			}
+		}
+		sv.servePage(w, r, documentsPage(rc, docs), rc)
+	}
+}
+
+func (sv *Server) handleCreateDocument() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB max
+			sv.error(w, "file too large", http.StatusBadRequest)
+			return
+		}
+		title := r.FormValue("title")
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			sv.error(w, "file required", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		content, err := io.ReadAll(file)
+		if err != nil {
+			sv.error(w, "failed to read file", http.StatusInternalServerError)
+			return
+		}
+
+		doc := Document{
+			ID:      uuid.New(),
+			Title:   title,
+			Content: content,
+		}
+		if err := sv.db.DocumentCreate(doc); err != nil {
+			sv.error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := sv.db.WorkspaceAddDocument(rc.ActiveWorkspace.ID, doc.ID); err != nil {
+			sv.error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func (sv *Server) handleDocumentView() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		docIDStr := r.PathValue("id")
+		docID, err := uuid.Parse(docIDStr)
+		if err != nil {
+			sv.error(w, "invalid document ID", http.StatusBadRequest)
+			return
+		}
+		// Verify document belongs to active workspace.
+		found := false
+		for _, d := range rc.ActiveWorkspace.Documents {
+			if d == docID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sv.error(w, "document not found in workspace", http.StatusNotFound)
+			return
+		}
+		var doc Document
+		if err := sv.db.DocumentByUUID(&doc, docID); err != nil {
+			sv.error(w, "document not found", http.StatusNotFound)
+			return
+		}
+		sv.servePage(w, r, documentPage(rc, doc), rc)
+	}
+}
+
+func (sv *Server) handleUpdateDocumentName() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		docIDStr := r.PathValue("id")
+		docID, err := uuid.Parse(docIDStr)
+		if err != nil {
+			sv.error(w, "invalid document ID", http.StatusBadRequest)
+			return
+		}
+		// Verify document belongs to active workspace.
+		found := false
+		for _, d := range rc.ActiveWorkspace.Documents {
+			if d == docID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sv.error(w, "document not found in workspace", http.StatusNotFound)
+			return
+		}
+		var doc Document
+		if err := sv.db.DocumentByUUID(&doc, docID); err != nil {
+			sv.error(w, "document not found", http.StatusNotFound)
+			return
+		}
+		newName := r.FormValue("name")
+		if newName == "" {
+			sv.error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		doc.Title = newName
+		if err := sv.db.DocumentUpdate(doc); err != nil {
+			sv.error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	}
 }
 

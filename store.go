@@ -14,7 +14,9 @@ import (
 )
 
 var (
-	bucketUsers = []byte("users")
+	bucketUsers      = []byte("users")
+	bucketWorkspaces = []byte("workspaces")
+	bucketDocuments  = []byte("documents")
 
 	errEndIter = errors.New("error flagging end of DB iteration")
 )
@@ -32,25 +34,36 @@ type User struct {
 
 type Workspace struct {
 	ID        uuid.UUID   `json:"uuid"`
+	OwnerID   uuid.UUID   `json:"owner_uuid"`
+	Name      string      `json:"name"`
+	CreatedAt time.Time   `json:"created_at"`
 	Members   []Member    `json:"members"`
 	Documents []uuid.UUID `json:"documents"`
 }
 
 type Member struct {
 	UserID        uuid.UUID `json:"user_uuid"`
+	AddedBy       uuid.UUID `json:"added_by_uuid"`
+	JoinedAt      time.Time `json:"joined_at"`
 	WorkspaceRole Role      `json:"workspace_role"`
 }
 
 type DocumentView struct {
-	ID    uuid.UUID `json:"uuid"`
-	Title string    `json:"title"`
+	ID        uuid.UUID `json:"uuid"`
+	CreatorID uuid.UUID `json:"creator_uuid"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 	// Content field is omitted. will not be unmarshalled.
 }
 
 type Document struct {
-	ID      uuid.UUID `json:"uuid"`
-	Title   string    `json:"title"`
-	Content []byte    `json:"content"`
+	ID        uuid.UUID `json:"uuid"`
+	CreatorID uuid.UUID `json:"creator_uuid"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Content   []byte    `json:"content"`
 }
 
 func (doc *Document) Validate() (err error) {
@@ -68,11 +81,23 @@ func (doc *Document) Validate() (err error) {
 }
 
 func (m *Member) HasClearance(requiredClearance Role) bool {
-	return m.WorkspaceRole >= requiredClearance
+	return m.WorkspaceRole.IsValid() && m.WorkspaceRole >= requiredClearance
+}
+
+func (u *User) WorkspaceRole(ws *Workspace) Role {
+	if u.Role >= RoleAdmin {
+		return u.Role.Canon() // Server admins or owners override workspace role across all workspaces.
+	}
+	for i := range ws.Members {
+		if ws.Members[i].UserID == u.ID {
+			return ws.Members[i].WorkspaceRole.Canon()
+		}
+	}
+	return 0
 }
 
 func (u *User) HasClearance(requiredClearance Role) bool {
-	return u.Role >= requiredClearance
+	return u.Role.IsValid() && u.Role >= requiredClearance
 }
 
 func (u *User) validateForUpdate() error {
@@ -127,7 +152,7 @@ func (db *Store) Open(filename string) error {
 	db.mailCacheMu.Unlock()
 
 	err = bdb.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketUsers} {
+		for _, bucket := range [][]byte{bucketUsers, bucketWorkspaces, bucketDocuments} {
 			if tx.Bucket(bucket) == nil {
 				// Bucket does not exist, we create it.
 				_, err := tx.CreateBucket(bucket)
@@ -255,6 +280,77 @@ func (db *Store) Users(cb func(dst *User) error) error {
 	return err
 }
 
+// Workspace CRUD
+
+func (db *Store) WorkspaceByUUID(dst *Workspace, id uuid.UUID) error {
+	return db.read(id, dst, bucketWorkspaces)
+}
+
+func (db *Store) WorkspaceCreate(ws Workspace) error {
+	if err := validateID(ws.ID); err != nil {
+		return err
+	}
+	ws.CreatedAt = time.Now()
+	return db.create(ws.ID, ws, bucketWorkspaces)
+}
+
+func (db *Store) WorkspaceUpdate(ws Workspace) error {
+	if err := validateID(ws.ID); err != nil {
+		return err
+	}
+	return db.update(ws.ID, ws, bucketWorkspaces)
+}
+
+func (db *Store) WorkspaceDelete(id uuid.UUID) error {
+	return db.delete(id, bucketWorkspaces)
+}
+
+// WorkspaceAddDocument adds a document to a workspace's document list.
+func (db *Store) WorkspaceAddDocument(wsID, docID uuid.UUID) error {
+	var ws Workspace
+	if err := db.read(wsID, &ws, bucketWorkspaces); err != nil {
+		return err
+	}
+	ws.Documents = append(ws.Documents, docID)
+	return db.update(wsID, ws, bucketWorkspaces)
+}
+
+// Document CRUD
+
+func (db *Store) DocumentByUUID(dst *Document, id uuid.UUID) error {
+	return db.read(id, dst, bucketDocuments)
+}
+
+func (db *Store) DocumentViewByUUID(dst *DocumentView, id uuid.UUID) error {
+	return db.read(id, dst, bucketDocuments)
+}
+
+func (db *Store) DocumentCreate(doc Document) error {
+	if err := doc.Validate(); err != nil {
+		return err
+	}
+	doc.CreatedAt = time.Now()
+	doc.UpdatedAt = doc.CreatedAt
+	return db.create(doc.ID, doc, bucketDocuments)
+}
+
+func (db *Store) DocumentUpdate(doc Document) error {
+	if err := doc.Validate(); err != nil {
+		return err
+	}
+	var existing Document
+	if err := db.read(doc.ID, &existing, bucketDocuments); err != nil {
+		return err
+	}
+	doc.CreatedAt = existing.CreatedAt
+	doc.UpdatedAt = time.Now()
+	return db.update(doc.ID, doc, bucketDocuments)
+}
+
+func (db *Store) DocumentDelete(id uuid.UUID) error {
+	return db.delete(id, bucketDocuments)
+}
+
 // Low Level CRUD with JSON storage scheme.
 // API can be extended to have vararg buckets ...[]byte argument for bucket nesting.
 
@@ -329,7 +425,7 @@ func validateText(data []byte) error {
 		MB
 	)
 	const maxTextSize = 10 * MB
-	if len(data) > 5*MB {
+	if len(data) > maxTextSize {
 		return fmt.Errorf("text size exceeds max database size of %d megabytes", maxTextSize/MB)
 	} else if idx := unprintableIndex(data); idx >= 0 {
 		return fmt.Errorf("text contains unprintable character at %d: %q", idx, data[idx])
