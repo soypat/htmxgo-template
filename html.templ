@@ -267,6 +267,9 @@ templ page(component templ.Component, rc RequestContext) {
 					@activeLink("/users", "Users", rc.Page == pageUsers)
 				}
 				<span class="spacer"></span>
+				if rc.ActiveWorkspace != nil {
+					<span class="workspace-badge">{ rc.ActiveWorkspace.Name }</span>
+				}
 				<span class="email">{ rc.User.Email }</span>
 				<a href="/logout">Logout</a>
 			</nav>
@@ -368,6 +371,14 @@ templ pageStyle() {
             background: #34495e;
         }
         nav .spacer { flex: 1; }
+        nav .workspace-badge {
+            background: #3498db;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
         nav .email { color: #bdc3c7; font-size: 14px; }
 
         .card {
