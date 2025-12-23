@@ -23,7 +23,7 @@ var (
 
 type User struct {
 	Email string    `json:"email"`
-	ID    uuid.UUID `json:"uuid"`
+	ID    uuid.UUID `json:"id"`
 	Role  Role      `json:"role"`
 	// Provider is the OAuth provider for this user's email.
 	Provider   string      `json:"provider"`
@@ -33,8 +33,8 @@ type User struct {
 }
 
 type Workspace struct {
-	ID        uuid.UUID   `json:"uuid"`
-	OwnerID   uuid.UUID   `json:"owner_uuid"`
+	ID        uuid.UUID   `json:"id"`
+	OwnerID   uuid.UUID   `json:"owner_id"`
 	Name      string      `json:"name"`
 	CreatedAt time.Time   `json:"created_at"`
 	Members   []Member    `json:"members"`
@@ -42,15 +42,16 @@ type Workspace struct {
 }
 
 type Member struct {
-	UserID        uuid.UUID `json:"user_uuid"`
-	AddedBy       uuid.UUID `json:"added_by_uuid"`
+	UserID        uuid.UUID `json:"user_id"`
+	Email         string    `json:"email"`
+	AddedBy       uuid.UUID `json:"added_by_id"`
 	JoinedAt      time.Time `json:"joined_at"`
 	WorkspaceRole Role      `json:"workspace_role"`
 }
 
 type DocumentView struct {
-	ID        uuid.UUID `json:"uuid"`
-	CreatorID uuid.UUID `json:"creator_uuid"`
+	ID        uuid.UUID `json:"id"`
+	CreatorID uuid.UUID `json:"creator_id"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -58,8 +59,8 @@ type DocumentView struct {
 }
 
 type Document struct {
-	ID        uuid.UUID `json:"uuid"`
-	CreatorID uuid.UUID `json:"creator_uuid"`
+	ID        uuid.UUID `json:"id"`
+	CreatorID uuid.UUID `json:"creator_id"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -94,6 +95,16 @@ func (u *User) WorkspaceRole(ws *Workspace) Role {
 		}
 	}
 	return 0
+}
+
+// EmailByMemberID returns the email of a workspace member by their user ID, or empty string if not found.
+func (ws *Workspace) EmailByMemberID(userID uuid.UUID) string {
+	for i := range ws.Members {
+		if ws.Members[i].UserID == userID {
+			return ws.Members[i].Email
+		}
+	}
+	return ""
 }
 
 func (u *User) HasClearance(requiredClearance Role) bool {

@@ -274,7 +274,7 @@ func (sv *Server) handleUsers() RoleHandlerFunc {
 			sv.error(w, err.Error(), 500)
 			return
 		}
-		sv.servePage(w, r, usersPage(users), rc)
+		sv.servePage(w, r, usersPage(rc, users), rc)
 	}
 }
 
@@ -294,9 +294,13 @@ func (sv *Server) handleWorkspaces() RoleHandlerFunc {
 func (sv *Server) handleCreateWorkspace() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		ws := Workspace{
-			ID: uuid.New(),
+			ID:      uuid.New(),
+			OwnerID: rc.User.ID,
+			Name:    r.FormValue("name"),
 			Members: []Member{{
 				UserID:        rc.User.ID,
+				Email:         rc.User.Email,
+				AddedBy:       rc.User.ID,
 				JoinedAt:      time.Now(),
 				WorkspaceRole: RoleAdmin,
 			}},
@@ -403,9 +407,10 @@ func (sv *Server) handleCreateDocument() RoleHandlerFunc {
 		}
 
 		doc := Document{
-			ID:      uuid.New(),
-			Title:   title,
-			Content: content,
+			ID:        uuid.New(),
+			CreatorID: rc.User.ID,
+			Title:     title,
+			Content:   content,
 		}
 		if err := sv.db.DocumentCreate(doc); err != nil {
 			sv.error(w, err.Error(), http.StatusBadRequest)

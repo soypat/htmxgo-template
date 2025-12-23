@@ -3,13 +3,15 @@ package main
 import (
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 templ landingPage(rc RequestContext) {
 	<h2>Welcome { rc.User.Email }!</h2>
 }
 
-templ usersPage(users []User) {
+templ usersPage(rc RequestContext, users []User) {
 	<div class="section">
 		<div class="section-header">
 			<h2>User Management</h2>
@@ -41,10 +43,10 @@ templ usersPage(users []User) {
 								</td>
 								<td class="user-id">{ user.ID.String()[:8] }...</td>
 								<td class="user-time">
-									@compPrettyDiffTime(time.Now(), user.CreatedAt)
+									@compPrettyDiffTime(rc.Now, user.CreatedAt)
 								</td>
 								<td class="user-time">
-									@compPrettyDiffTime(time.Now(), user.UpdatedAt)
+									@compPrettyDiffTime(rc.Now, user.UpdatedAt)
 								</td>
 								<td>
 									@sendToastButton(user.Email)
@@ -106,12 +108,32 @@ templ workspacesPage(rc RequestContext, workspaces []Workspace) {
 			<h2>My Workspaces</h2>
 			<div class="flex">
 				<span class="status-badge status-running">{ strconv.Itoa(len(workspaces)) } workspaces</span>
-				<form hx-post="/workspaces" hx-swap="none">
-					<button type="submit" class="btn btn-primary btn-sm">New Workspace</button>
-				</form>
+				<button
+					class="btn btn-primary btn-sm"
+					onclick="document.getElementById('new-workspace-form').style.display='flex'; this.style.display='none';"
+				>
+					New Workspace
+				</button>
 			</div>
 		</div>
 		<div class="card">
+			<form
+				id="new-workspace-form"
+				class="new-workspace-form"
+				style="display: none;"
+				hx-post="/workspaces"
+				hx-swap="none"
+			>
+				<input type="text" name="name" placeholder="Workspace name..." required class="workspace-name-input"/>
+				<button type="submit" class="btn btn-success btn-sm">Create</button>
+				<button
+					type="button"
+					class="btn btn-secondary btn-sm"
+					onclick="this.closest('form').style.display='none'; document.querySelector('.section-header .btn').style.display='inline-block';"
+				>
+					Cancel
+				</button>
+			</form>
 			if len(workspaces) == 0 {
 				<p>No workspaces found. Create one to get started!</p>
 			} else {
@@ -119,18 +141,23 @@ templ workspacesPage(rc RequestContext, workspaces []Workspace) {
 					for _, ws := range workspaces {
 						<li class="workspace-item">
 							<div class="workspace-link">
-								<span class="workspace-id">{ ws.ID.String()[:8] }...</span>
+								<div class="workspace-info">
+									<span class="workspace-name">{ ws.Name }</span>
+									<span class="workspace-id" data-tooltip={ ws.ID.String() }>{ ws.ID.String()[:8] }...</span>
+								</div>
 								<span class="workspace-meta">
 									{ strconv.Itoa(len(ws.Documents)) } docs &middot; { strconv.Itoa(len(ws.Members)) } members
+									&middot;
+									@compUserRef(rc, ws.OwnerID, "owned by ")
 								</span>
 								<span class="workspace-time">
-									@compPrettyDiffTime(time.Now(), ws.CreatedAt)
+									@compPrettyDiffTime(rc.Now, ws.CreatedAt)
 								</span>
 								if rc.ActiveWorkspace != nil && rc.ActiveWorkspace.ID == ws.ID {
 									<span class="status-badge status-finished">Active</span>
 								} else {
 									<form hx-post={ "/workspaces/" + ws.ID.String() + "/activate" } hx-swap="none">
-										<button type="submit" class="btn btn-success btn-sm">Activate</button>
+										<button type="submit" class="btn btn-primary btn-sm">Activate</button>
 									</form>
 								}
 							</div>
@@ -186,9 +213,14 @@ templ documentsPage(rc RequestContext, docs []DocumentView) {
 					for _, doc := range docs {
 						<li class="document-item">
 							<a href={ templ.SafeURL("/documents/" + doc.ID.String()) } class="document-link">
-								<span class="document-title">{ doc.Title }</span>
+								<div class="document-info">
+									<span class="document-title">{ doc.Title }</span>
+									<span class="document-creator">
+										@compUserRef(rc, doc.CreatorID, "by ")
+									</span>
+								</div>
 								<span class="document-time">
-									@compPrettyDiffTime(time.Now(), doc.UpdatedAt)
+									@compPrettyDiffTime(rc.Now, doc.UpdatedAt)
 								</span>
 							</a>
 						</li>
@@ -207,6 +239,9 @@ templ documentPage(rc RequestContext, doc Document) {
 		</div>
 		<div class="card">
 			<div class="document-meta">
+				<span>
+					@compUserRef(rc, doc.CreatorID, "Created by ")
+				</span>
 				<span>Created: { doc.CreatedAt.Format("2006-01-02 15:04") }</span>
 				<span>Updated: { doc.UpdatedAt.Format("2006-01-02 15:04") }</span>
 			</div>
@@ -240,7 +275,7 @@ templ page(component templ.Component, rc RequestContext) {
 			</div>
 			<footer class="container">
 				<div>
-					<small>&copy; { strconv.Itoa(time.Now().Year()) } Gemplhtmxo. All rights reserved.</small>
+					<small>&copy; { strconv.Itoa(rc.Now.Year()) } Gemplhtmxo. All rights reserved.</small>
 				</div>
 				<div>
 					<p><em>The world in the palm of <strong>your</strong> hand.</em></p>
@@ -699,9 +734,85 @@ templ pageStyle() {
             overflow-y: auto;
             margin: 0;
         }
+
+        /* User reference styles */
+        .user-ref {
+            font-size: 12px;
+            color: #666;
+        }
+        .user-ref-you {
+            font-weight: 500;
+            color: #27ae60;
+        }
+        .user-ref-email {
+            color: #3498db;
+            cursor: help;
+        }
+        .user-ref-id {
+            font-family: monospace;
+            color: #888;
+            cursor: help;
+        }
+
+        /* Workspace name styles */
+        .workspace-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 140px;
+        }
+        .workspace-name {
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 15px;
+        }
+        .workspace-owner {
+            font-size: 12px;
+            color: #888;
+        }
+
+        /* New workspace form */
+        .new-workspace-form {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .workspace-name-input {
+            width: 200px !important;
+        }
+
+        /* Document info styles */
+        .document-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .document-creator {
+            font-size: 12px;
+            color: #888;
+        }
     </style>
 }
 
 templ compPrettyDiffTime(now, createdAt time.Time) {
 	<em data-tooltip={ createdAt.Format("2006 Jan 02 15:04") }>{ fmtSeconds(now.Sub(createdAt).Seconds()) } ago</em>
+}
+
+// compUserRef displays a user reference with "you" for current user or truncated ID with tooltip.
+// Maybe could show Email in future and even user avatar.
+templ compUserRef(rc RequestContext, ref uuid.UUID, prefix string) {
+	<span class="user-ref">
+		{ prefix }
+		if rc.User.ID == ref {
+			<span class="user-ref-you">you</span>
+		} else if rc.ActiveWorkspace != nil && rc.ActiveWorkspace.EmailByMemberID(ref) != "" {
+			<span class="user-ref-email" data-tooltip={ ref.String() }>{ rc.ActiveWorkspace.EmailByMemberID(ref) }</span>
+		} else {
+			<span class="user-ref-id" data-tooltip={ ref.String() }>{ ref.String()[:8] }...</span>
+		}
+	</span>
 }
