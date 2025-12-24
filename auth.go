@@ -66,6 +66,7 @@ type RoleHandlerFunc func(w http.ResponseWriter, r *http.Request, rc RequestCont
 
 type Authenticator interface {
 	GetEmail(r *http.Request) string
+	GetCSRFToken(r *http.Request) string
 	HandleLogin(w http.ResponseWriter, r *http.Request)
 	HandleCallback(w http.ResponseWriter, r *http.Request)
 	HandleLogout(w http.ResponseWriter, r *http.Request)
@@ -78,6 +79,7 @@ type Auth struct {
 
 type AuthSession struct {
 	Email     string
+	CSRFToken string
 	ExpiresAt time.Time
 }
 
@@ -114,6 +116,20 @@ func (a *Auth) GetEmail(r *http.Request) string {
 		return ""
 	}
 	return sess.Email
+}
+
+// GetCSRFToken returns the CSRF token for the session, or empty if not logged in.
+func (a *Auth) GetCSRFToken(r *http.Request) string {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return ""
+	}
+
+	sess, ok := a.sessions[cookie.Value]
+	if !ok || time.Now().After(sess.ExpiresAt) {
+		return ""
+	}
+	return sess.CSRFToken
 }
 
 // HandleLogin redirects to Google OAuth.
@@ -171,6 +187,7 @@ func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	sessionToken := rand32String()
 	a.sessions[sessionToken] = &AuthSession{
 		Email:     userInfo.Email,
+		CSRFToken: rand32String(),
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
 
@@ -210,11 +227,19 @@ func rand32String() string {
 
 // DevAuth is a simple auth for development that auto-logs in with a fixed email.
 type DevAuth struct {
-	Email string
+	Email     string
+	csrfToken string
 }
 
 func (d *DevAuth) GetEmail(r *http.Request) string {
 	return d.Email
+}
+
+func (d *DevAuth) GetCSRFToken(r *http.Request) string {
+	if d.csrfToken == "" {
+		d.csrfToken = rand32String()
+	}
+	return d.csrfToken
 }
 
 func (d *DevAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {

@@ -49,7 +49,7 @@ templ usersPage(rc RequestContext, users []User) {
 									@compPrettyDiffTime(rc.Now, user.UpdatedAt)
 								</td>
 								<td>
-									@sendToastButton(user.Email)
+									@sendToastButton(rc, user.Email)
 								</td>
 							</tr>
 						}
@@ -60,7 +60,7 @@ templ usersPage(rc RequestContext, users []User) {
 	</div>
 }
 
-templ sendToastButton(email string) {
+templ sendToastButton(rc RequestContext, email string) {
 	<div class="toast-action">
 		<button
 			class="btn btn-primary btn-sm"
@@ -75,6 +75,7 @@ templ sendToastButton(email string) {
 			hx-swap="none"
 			hx-on::after-request="this.reset(); this.style.display='none'; this.previousElementSibling.style.display='inline-block';"
 		>
+			@csrfInput(rc)
 			<input type="hidden" name="email" value={ email }/>
 			<input type="text" name="message" placeholder="Toast message..." required class="toast-input"/>
 			<select name="type" class="toast-type-select">
@@ -124,6 +125,7 @@ templ workspacesPage(rc RequestContext, workspaces []Workspace) {
 				hx-post="/workspaces"
 				hx-swap="none"
 			>
+				@csrfInput(rc)
 				<input type="text" name="name" placeholder="Workspace name..." required class="workspace-name-input"/>
 				<button type="submit" class="btn btn-success btn-sm">Create</button>
 				<button
@@ -157,6 +159,7 @@ templ workspacesPage(rc RequestContext, workspaces []Workspace) {
 									<span class="status-badge status-finished">Active</span>
 								} else {
 									<form hx-post={ "/workspaces/" + ws.ID.String() + "/activate" } hx-swap="none">
+										@csrfInput(rc)
 										<button type="submit" class="btn btn-primary btn-sm">Activate</button>
 									</form>
 								}
@@ -193,6 +196,7 @@ templ documentsPage(rc RequestContext, docs []DocumentView) {
 				hx-swap="none"
 				hx-on::after-request="location.reload();"
 			>
+				@csrfInput(rc)
 				<input type="text" name="title" placeholder="Document title..." required/>
 				<input type="file" name="file" required/>
 				<div class="flex">
@@ -267,6 +271,7 @@ templ membersPage(rc RequestContext) {
 					hx-post="/members"
 					hx-swap="none"
 				>
+					@csrfInput(rc)
 					<input type="email" name="email" placeholder="user@example.com" required class="member-email-input"/>
 					<select name="role" class="member-role-select">
 						<option value="external">External</option>
@@ -306,6 +311,7 @@ templ membersPage(rc RequestContext) {
 							<td>
 								if rc.WorkspaceRole >= RoleAdmin && rc.ActiveWorkspace.OwnerID != member.UserID && rc.User.ID != member.UserID {
 									<form hx-post={ "/members/" + member.UserID.String() + "/role" } hx-swap="none" class="role-form">
+										@csrfInput(rc)
 										<select name="role" class="role-select" onchange="this.form.requestSubmit()">
 											<option value="external" selected?={ member.WorkspaceRole == RoleExternal }>External</option>
 											<option value="user" selected?={ member.WorkspaceRole == RoleUser }>User</option>
@@ -330,6 +336,7 @@ templ membersPage(rc RequestContext) {
 											class="btn btn-danger btn-sm"
 											hx-delete={ "/members/" + member.UserID.String() }
 											hx-swap="none"
+											hx-headers={ "{\"X-CSRF-Token\":\"" + rc.CSRFToken + "\"}" }
 											hx-confirm="Remove this member from the workspace?"
 										>
 											Remove
@@ -340,6 +347,7 @@ templ membersPage(rc RequestContext) {
 											class="btn btn-primary btn-sm"
 											hx-post={ "/workspaces/transfer-owner?to=" + member.UserID.String() }
 											hx-swap="none"
+											hx-headers={ "{\"X-CSRF-Token\":\"" + rc.CSRFToken + "\"}" }
 											hx-confirm="Transfer ownership to this member? You will become an Admin."
 										>
 											Make Owner
@@ -991,4 +999,9 @@ templ compUserRef(rc RequestContext, ref uuid.UUID, prefix string) {
 			<span class="user-ref-id" data-tooltip={ ref.String() }>{ ref.String()[:8] }...</span>
 		}
 	</span>
+}
+
+// csrfInput renders a hidden CSRF token input for forms.
+templ csrfInput(rc RequestContext) {
+	<input type="hidden" name="csrf_token" value={ rc.CSRFToken }/>
 }

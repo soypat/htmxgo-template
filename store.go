@@ -247,16 +247,23 @@ func (db *Store) UserUpdate(updatedUser User) error {
 	if err := db.read(updatedUser.ID, &existing, bucketUsers); err != nil {
 		return err
 	}
-	// Handle email change in cache.
-	if existing.Email != updatedUser.Email {
+	oldEmail := existing.Email
+	updatedUser.CreatedAt = existing.CreatedAt
+	updatedUser.UpdatedAt = time.Now()
+
+	// DB write first.
+	if err := db.update(updatedUser.ID, updatedUser, bucketUsers); err != nil {
+		return err
+	}
+
+	// Update cache only after DB write succeeds.
+	if oldEmail != updatedUser.Email {
 		db.mailCacheMu.Lock()
-		delete(db.mailCache, existing.Email)
+		delete(db.mailCache, oldEmail)
 		db.mailCache[updatedUser.Email] = updatedUser.ID
 		db.mailCacheMu.Unlock()
 	}
-	updatedUser.CreatedAt = existing.CreatedAt
-	updatedUser.UpdatedAt = time.Now()
-	return db.update(updatedUser.ID, updatedUser, bucketUsers)
+	return nil
 }
 
 func (db *Store) UserDelete(id uuid.UUID) error {
@@ -326,6 +333,87 @@ func (db *Store) WorkspaceAddDocument(wsID, docID uuid.UUID) error {
 	return db.update(wsID, ws, bucketWorkspaces)
 }
 
+// WorkspaceAddMember atomically adds a member to a workspace and the workspace to the user's list.
+func (db *Store) WorkspaceAddMember(wsID uuid.UUID, newMember Member) error {
+	if err := validateID(wsID); err != nil {
+		return err
+	}
+	if err := validateID(newMember.UserID); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		var ws Workspace
+		if err := db.txRead(tx, wsID, &ws, bucketWorkspaces); err != nil {
+			return err
+		}
+		for i := range ws.Members {
+			if ws.Members[i].UserID == newMember.UserID {
+				return errors.New("already a member")
+			}
+		}
+		var user User
+		if err := db.txRead(tx, newMember.UserID, &user, bucketUsers); err != nil {
+			return err
+		}
+
+		ws.Members = append(ws.Members, newMember)
+		user.Workspaces = append(user.Workspaces, wsID)
+		user.UpdatedAt = time.Now()
+
+		if err := db.txUpdate(tx, wsID, ws, bucketWorkspaces); err != nil {
+			return err
+		}
+		return db.txUpdate(tx, newMember.UserID, user, bucketUsers)
+	})
+}
+
+// WorkspaceRemoveMember atomically removes a member from a workspace and the workspace from the user's list.
+func (db *Store) WorkspaceRemoveMember(wsID, memberUserID uuid.UUID) error {
+	if err := validateID(wsID); err != nil {
+		return err
+	}
+	if err := validateID(memberUserID); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		var ws Workspace
+		if err := db.txRead(tx, wsID, &ws, bucketWorkspaces); err != nil {
+			return err
+		}
+		var user User
+		if err := db.txRead(tx, memberUserID, &user, bucketUsers); err != nil {
+			return err
+		}
+
+		// Remove member from workspace.
+		found := false
+		for i, m := range ws.Members {
+			if m.UserID == memberUserID {
+				ws.Members = append(ws.Members[:i], ws.Members[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("member not found in workspace")
+		}
+
+		// Remove workspace from user.
+		for i, id := range user.Workspaces {
+			if id == wsID {
+				user.Workspaces = append(user.Workspaces[:i], user.Workspaces[i+1:]...)
+				break
+			}
+		}
+		user.UpdatedAt = time.Now()
+
+		if err := db.txUpdate(tx, wsID, ws, bucketWorkspaces); err != nil {
+			return err
+		}
+		return db.txUpdate(tx, memberUserID, user, bucketUsers)
+	})
+}
+
 // Document CRUD
 
 func (db *Store) DocumentByUUID(dst *Document, id uuid.UUID) error {
@@ -370,16 +458,7 @@ func (db *Store) create(id uuid.UUID, object any, bucket []byte) error {
 		return err
 	}
 	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucket)
-		data := b.Get(id[:])
-		if data != nil {
-			return fmt.Errorf("%T already exists", object)
-		}
-		data, err := json.Marshal(object)
-		if err != nil {
-			panic(err) // Unreachable in theory.
-		}
-		return b.Put(id[:], data)
+		return db.txCreate(tx, id, object, bucket)
 	})
 }
 
@@ -387,13 +466,8 @@ func (db *Store) read(id uuid.UUID, ptrToObject any, bucket []byte) error {
 	if err := validateID(id); err != nil {
 		return err
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucket)
-		data := b.Get(id[:])
-		if data == nil {
-			return fmt.Errorf("%T does not exist", ptrToObject)
-		}
-		return json.Unmarshal(data, ptrToObject)
+	return db.db.View(func(tx *bbolt.Tx) error {
+		return db.txRead(tx, id, ptrToObject, bucket)
 	})
 }
 
@@ -402,16 +476,7 @@ func (db *Store) update(id uuid.UUID, object any, bucket []byte) error {
 		return err
 	}
 	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucket)
-		data := b.Get(id[:])
-		if data == nil {
-			return fmt.Errorf("%T does not exist to update", object)
-		}
-		data, err := json.Marshal(object)
-		if err != nil {
-			panic(err) // Unreachable in theory.
-		}
-		return b.Put(id[:], data)
+		return db.txUpdate(tx, id, object, bucket)
 	})
 }
 
@@ -420,13 +485,52 @@ func (db *Store) delete(id uuid.UUID, bucket []byte) error {
 		return err
 	}
 	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucket)
-		data := b.Get(id[:])
-		if data == nil {
-			return errors.New("for deletion does not exist")
-		}
-		return b.Delete(id[:])
+		return db.txDelete(tx, id, bucket)
 	})
+}
+
+func (db *Store) txCreate(tx *bbolt.Tx, id uuid.UUID, object any, bucket []byte) error {
+	b := tx.Bucket(bucket)
+	data := b.Get(id[:])
+	if data != nil {
+		return fmt.Errorf("%T already exists", object)
+	}
+	data, err := json.Marshal(object)
+	if err != nil {
+		panic(err) // Unreachable in theory.
+	}
+	return b.Put(id[:], data)
+}
+
+func (db *Store) txRead(tx *bbolt.Tx, id uuid.UUID, ptrToObject any, bucket []byte) error {
+	b := tx.Bucket(bucket)
+	data := b.Get(id[:])
+	if data == nil {
+		return fmt.Errorf("%T does not exist", ptrToObject)
+	}
+	return json.Unmarshal(data, ptrToObject)
+}
+
+func (db *Store) txUpdate(tx *bbolt.Tx, id uuid.UUID, obj any, bucket []byte) error {
+	b := tx.Bucket(bucket)
+	data := b.Get(id[:])
+	if data == nil {
+		return fmt.Errorf("%T does not exist to update", obj)
+	}
+	data, err := json.Marshal(obj)
+	if err != nil {
+		panic(err) // Unreachable in theory.
+	}
+	return b.Put(id[:], data)
+}
+
+func (db *Store) txDelete(tx *bbolt.Tx, id uuid.UUID, bucket []byte) error {
+	b := tx.Bucket(bucket)
+	data := b.Get(id[:])
+	if data == nil {
+		return errors.New("id for deletion does not exist")
+	}
+	return b.Delete(id[:])
 }
 
 func validateText(data []byte) error {

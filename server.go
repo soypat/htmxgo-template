@@ -24,6 +24,7 @@ type RequestContext struct {
 	Page            Page
 	ActiveWorkspace *Workspace
 	WorkspaceRole   Role
+	CSRFToken       string
 	Now             time.Time
 }
 
@@ -31,12 +32,12 @@ type RequestContext struct {
 type Page uint8
 
 const (
-	pageUndefined = iota
-	pageLanding
-	pageUsers
-	pageWorkspaces
-	pageDocuments
-	pageMembers
+	pageUndefined  Page = iota // undefined
+	pageLanding                // landing
+	pageUsers                  // users
+	pageWorkspaces             // workspaces
+	pageDocuments              // documents
+	pageMembers                // members
 )
 
 const activeWorkspaceCookie = "active_workspace"
@@ -112,6 +113,9 @@ func (sv *Server) Init(flags Flags) (err error) {
 
 	sv.router = http.NewServeMux()
 	sv.HandleFuncNoAuth("/", sv.handleLanding())
+	sv.HandleFuncNoAuth("/login", sv.auth.HandleLogin)
+	sv.HandleFuncNoAuth("/auth/callback", sv.auth.HandleCallback)
+	sv.HandleFuncNoAuth("/logout", sv.auth.HandleLogout)
 	sv.HandleFuncNoWorkspace(RoleAdmin, "GET /users", sv.handleUsers())
 	sv.HandleFuncNoWorkspace(RoleAdmin, "POST /users/send-toast", sv.handleSendUserToast())
 
@@ -165,6 +169,13 @@ func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handl
 			http.Redirect(w, r, "/workspaces", http.StatusSeeOther)
 			return
 		}
+		// Validate CSRF for mutating requests.
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+			if !sv.validateCSRF(r, rc) {
+				sv.error(w, "invalid CSRF token", http.StatusForbidden)
+				return
+			}
+		}
 		handler(w, r, rc)
 	})
 }
@@ -184,6 +195,13 @@ func (sv *Server) HandleFuncNoWorkspace(requiredClearance Role, parentPattern st
 		if !rc.User.HasClearance(requiredClearance) {
 			http.NotFound(w, r)
 			return
+		}
+		// Validate CSRF for mutating requests.
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+			if !sv.validateCSRF(r, rc) {
+				sv.error(w, "invalid CSRF token", http.StatusForbidden)
+				return
+			}
 		}
 		handler(w, r, rc)
 	})
@@ -229,6 +247,7 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 	case "/members":
 		rc.Page = pageMembers
 	}
+	rc.CSRFToken = sv.auth.GetCSRFToken(r)
 	rc.Now = time.Now()
 	return rc
 }
@@ -516,35 +535,34 @@ func (sv *Server) handleAddMember() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		email := r.FormValue("email")
 		if email == "" {
-			sv.errorShow(rc, "email is required")
+			sv.errorShow(rc, "email is required", nil)
 			return
 		}
 		var role Role
 		if err := role.UnmarshalText([]byte(r.FormValue("role"))); err != nil || role > rc.WorkspaceRole {
-			sv.errorShow(rc, "invalid role")
+			sv.errorShow(rc, "invalid role", err)
 			return
 		}
 		if slices.ContainsFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.Email == email }) {
-			sv.errorShow(rc, "already a member")
+			sv.errorShow(rc, "already a member", nil)
 			return
 		}
 
 		// User must already exist.
 		var user User
 		if err := sv.db.UserByEmail(&user, email); err != nil {
-			sv.errorShow(rc, "user not found")
+			sv.errorShow(rc, "user not found", err)
 			return
 		}
 
-		// Add Member to Workspace.Members.
-		rc.ActiveWorkspace.Members = append(rc.ActiveWorkspace.Members, Member{
+		// Atomically add member to workspace and workspace to user.
+		member := Member{
 			UserID: user.ID, Email: email, AddedBy: rc.User.ID, JoinedAt: time.Now(), WorkspaceRole: role,
-		})
-		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
-
-		// Add workspace ID to User.Workspaces (bidirectional link).
-		user.Workspaces = append(user.Workspaces, rc.ActiveWorkspace.ID)
-		sv.db.UserUpdate(user)
+		}
+		if err := sv.db.WorkspaceAddMember(rc.ActiveWorkspace.ID, member); err != nil {
+			sv.errorShow(rc, "failed to add member", err)
+			return
+		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "added " + email})
 		w.Header().Set("HX-Redirect", "/members")
@@ -556,25 +574,22 @@ func (sv *Server) handleRemoveMember() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		memberID, err := uuid.Parse(r.PathValue("id"))
 		if err != nil || memberID == rc.ActiveWorkspace.OwnerID || memberID == rc.User.ID {
-			sv.errorShow(rc, "cannot remove this member")
+			sv.errorShow(rc, "cannot remove this member", err)
 			return
 		}
 
 		// Find email before removing.
 		idx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == memberID })
 		if idx == -1 {
-			sv.errorShow(rc, "member not found")
+			sv.errorShow(rc, "member not found", nil)
 			return
 		}
 		email := rc.ActiveWorkspace.Members[idx].Email
-		rc.ActiveWorkspace.Members = slices.Delete(rc.ActiveWorkspace.Members, idx, idx+1)
-		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
 
-		// Remove workspace ID from User.Workspaces (bidirectional link).
-		var user User
-		if sv.db.UserByUUID(&user, memberID) == nil {
-			user.Workspaces = slices.DeleteFunc(user.Workspaces, func(wsID uuid.UUID) bool { return wsID == rc.ActiveWorkspace.ID })
-			sv.db.UserUpdate(user)
+		// Atomically remove member from workspace and workspace from user.
+		if err := sv.db.WorkspaceRemoveMember(rc.ActiveWorkspace.ID, memberID); err != nil {
+			sv.errorShow(rc, "failed to remove member", err)
+			return
 		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "removed " + email})
@@ -587,24 +602,27 @@ func (sv *Server) handleChangeMemberRole() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		memberID, err := uuid.Parse(r.PathValue("id"))
 		if err != nil || memberID == rc.ActiveWorkspace.OwnerID {
-			sv.errorShow(rc, "cannot change this role")
+			sv.errorShow(rc, "cannot change this role", err)
 			return
 		}
 		var newRole Role
 		if err := newRole.UnmarshalText([]byte(r.FormValue("role"))); err != nil || newRole > rc.WorkspaceRole {
-			sv.errorShow(rc, "invalid role")
+			sv.errorShow(rc, "invalid role", err)
 			return
 		}
 
 		// Update WorkspaceRole in Workspace.Members.
 		idx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == memberID })
 		if idx == -1 {
-			sv.errorShow(rc, "member not found")
+			sv.errorShow(rc, "member not found", nil)
 			return
 		}
 		email := rc.ActiveWorkspace.Members[idx].Email
 		rc.ActiveWorkspace.Members[idx].WorkspaceRole = newRole
-		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
+		if err := sv.db.WorkspaceUpdate(*rc.ActiveWorkspace); err != nil {
+			sv.errorShow(rc, "failed to update workspace", err)
+			return
+		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: email + " is now " + newRole.String()})
 		w.Header().Set("HX-Redirect", "/members")
@@ -616,14 +634,14 @@ func (sv *Server) handleTransferOwnership() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		newOwnerID, err := uuid.Parse(r.URL.Query().Get("to"))
 		if err != nil || newOwnerID == rc.User.ID {
-			sv.errorShow(rc, "invalid transfer target")
+			sv.errorShow(rc, "invalid transfer target", err)
 			return
 		}
 
 		// Find new owner and promote to Admin if needed. Demote old owner to Admin.
 		newOwnerIdx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == newOwnerID })
 		if newOwnerIdx == -1 {
-			sv.errorShow(rc, "user is not a member")
+			sv.errorShow(rc, "user is not a member", nil)
 			return
 		}
 		newOwnerEmail := rc.ActiveWorkspace.Members[newOwnerIdx].Email
@@ -638,7 +656,10 @@ func (sv *Server) handleTransferOwnership() RoleHandlerFunc {
 		}
 
 		rc.ActiveWorkspace.OwnerID = newOwnerID
-		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
+		if err := sv.db.WorkspaceUpdate(*rc.ActiveWorkspace); err != nil {
+			sv.errorShow(rc, "failed to update workspace", err)
+			return
+		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "transferred ownership to " + newOwnerEmail})
 		w.Header().Set("HX-Redirect", "/members")
@@ -657,8 +678,23 @@ func (sv *Server) serveComponent(w http.ResponseWriter, r *http.Request, c templ
 	slog.Debug("serveComponent:done", slog.String("req", r.URL.String()))
 }
 
-func (sv *Server) errorShow(rc RequestContext, msg string) {
-	sv.toasts.Send(rc.User.Email, Toast{Level: slog.LevelError, Message: msg})
+func (sv *Server) errorShow(rc RequestContext, contextForUser string, err error) {
+	if err != nil {
+		slog.Error("errorShow", slog.String("ctx", contextForUser), slog.String("err", err.Error()), slog.String("email", rc.User.Email), slog.String("page", rc.Page.String()))
+	} else {
+		slog.Warn("errorShow", slog.String("ctx", contextForUser), slog.String("email", rc.User.Email), slog.String("page", rc.Page.String()))
+	}
+	sv.toasts.Send(rc.User.Email, Toast{Level: slog.LevelError, Message: contextForUser})
+}
+
+// validateCSRF checks the CSRF token from the request against the session token.
+// Returns true if valid, false otherwise.
+func (sv *Server) validateCSRF(r *http.Request, rc RequestContext) bool {
+	token := r.FormValue("csrf_token")
+	if token == "" {
+		token = r.Header.Get("X-CSRF-Token")
+	}
+	return token != "" && token == rc.CSRFToken
 }
 
 func (sv *Server) error(w http.ResponseWriter, errstr string, code int) {
