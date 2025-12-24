@@ -28,6 +28,17 @@ func (enum *Role) UnmarshalJSON(b []byte) error {
 	return enumUnmarshalJSON(enum, b, roleEnd)
 }
 
+func (enum *Role) UnmarshalText(b []byte) error {
+	s := string(b)
+	for v := Role(0); v < roleEnd; v++ {
+		if v.String() == s && v.IsValid() {
+			*enum = v
+			return nil
+		}
+	}
+	return errors.New("invalid role: " + s)
+}
+
 func (role Role) IsValid() bool { return role > roleUndefined && role < roleEnd }
 
 // Canon sanitizes role and ensures if invalid is set to zero and fails all clearance checks.

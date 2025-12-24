@@ -250,6 +250,111 @@ templ documentPage(rc RequestContext, doc Document) {
 	</div>
 }
 
+templ membersPage(rc RequestContext) {
+	<div class="section">
+		<div class="section-header">
+			<h2>Members</h2>
+			<div class="flex">
+				<span class="status-badge status-running">{ strconv.Itoa(len(rc.ActiveWorkspace.Members)) } members</span>
+				<span class="member-role">Your role: { rc.WorkspaceRole.String() }</span>
+			</div>
+		</div>
+		<div class="card">
+			if rc.WorkspaceRole >= RoleModerator {
+				<form
+					id="add-member-form"
+					class="add-member-form"
+					hx-post="/members"
+					hx-swap="none"
+				>
+					<input type="email" name="email" placeholder="user@example.com" required class="member-email-input"/>
+					<select name="role" class="member-role-select">
+						<option value="external">External</option>
+						<option value="user" selected>User</option>
+						if rc.WorkspaceRole >= RoleAdmin {
+							<option value="moderator">Moderator</option>
+							<option value="admin">Admin</option>
+						}
+					</select>
+					<button type="submit" class="btn btn-success btn-sm">Add Member</button>
+				</form>
+			}
+			<table class="members-table">
+				<thead>
+					<tr>
+						<th>Email</th>
+						<th>Role</th>
+						<th>Joined</th>
+						<th>Added By</th>
+						if rc.WorkspaceRole >= RoleAdmin {
+							<th>Actions</th>
+						}
+					</tr>
+				</thead>
+				<tbody>
+					for _, member := range rc.ActiveWorkspace.Members {
+						<tr class={ templ.KV("member-owner", rc.ActiveWorkspace.OwnerID == member.UserID) }>
+							<td class="member-email">
+								{ member.Email }
+								if rc.ActiveWorkspace.OwnerID == member.UserID {
+									<span class="owner-badge">Owner</span>
+								}
+								if rc.User.ID == member.UserID {
+									<span class="you-badge">You</span>
+								}
+							</td>
+							<td>
+								if rc.WorkspaceRole >= RoleAdmin && rc.ActiveWorkspace.OwnerID != member.UserID && rc.User.ID != member.UserID {
+									<form hx-post={ "/members/" + member.UserID.String() + "/role" } hx-swap="none" class="role-form">
+										<select name="role" class="role-select" onchange="this.form.requestSubmit()">
+											<option value="external" selected?={ member.WorkspaceRole == RoleExternal }>External</option>
+											<option value="user" selected?={ member.WorkspaceRole == RoleUser }>User</option>
+											<option value="moderator" selected?={ member.WorkspaceRole == RoleModerator }>Moderator</option>
+											<option value="admin" selected?={ member.WorkspaceRole == RoleAdmin }>Admin</option>
+										</select>
+									</form>
+								} else {
+									<span class="member-role">{ member.WorkspaceRole.String() }</span>
+								}
+							</td>
+							<td class="member-time">
+								@compPrettyDiffTime(rc.Now, member.JoinedAt)
+							</td>
+							<td>
+								@compUserRef(rc, member.AddedBy, "")
+							</td>
+							if rc.WorkspaceRole >= RoleAdmin {
+								<td class="member-actions">
+									if rc.ActiveWorkspace.OwnerID != member.UserID && rc.User.ID != member.UserID {
+										<button
+											class="btn btn-danger btn-sm"
+											hx-delete={ "/members/" + member.UserID.String() }
+											hx-swap="none"
+											hx-confirm="Remove this member from the workspace?"
+										>
+											Remove
+										</button>
+									}
+									if rc.WorkspaceRole == RoleOwner && rc.ActiveWorkspace.OwnerID != member.UserID {
+										<button
+											class="btn btn-primary btn-sm"
+											hx-post={ "/workspaces/transfer-owner?to=" + member.UserID.String() }
+											hx-swap="none"
+											hx-confirm="Transfer ownership to this member? You will become an Admin."
+										>
+											Make Owner
+										</button>
+									}
+								</td>
+							}
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	</div>
+}
+
 templ page(component templ.Component, rc RequestContext) {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -262,6 +367,7 @@ templ page(component templ.Component, rc RequestContext) {
 				@activeLink("/workspaces", "Workspaces", rc.Page == pageWorkspaces)
 				if rc.ActiveWorkspace != nil {
 					@activeLink("/documents", "Documents", rc.Page == pageDocuments)
+					@activeLink("/members", "Members", rc.Page == pageMembers)
 				}
 				if rc.User.HasClearance(RoleAdmin) {
 					@activeLink("/users", "Users", rc.Page == pageUsers)
@@ -751,9 +857,14 @@ templ pageStyle() {
             font-size: 12px;
             color: #666;
         }
-        .user-ref-you {
+        .user-ref-you, .you-badge {
+            display: inline-block;
+            background: #27ae60;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
             font-weight: 500;
-            color: #27ae60;
         }
         .user-ref-email {
             color: #3498db;
@@ -805,6 +916,60 @@ templ pageStyle() {
         .document-creator {
             font-size: 12px;
             color: #888;
+        }
+
+        /* Members page styles */
+        .add-member-form {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .member-email-input {
+            width: 250px !important;
+        }
+        .member-role-select, .role-select {
+            width: 120px !important;
+            padding: 8px !important;
+        }
+        .members-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .members-table th, .members-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .members-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #555;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .members-table tr:hover { background: #f9f9f9; }
+        .members-table .member-owner { background: #fffbeb; }
+        .members-table .member-owner:hover { background: #fef3c7; }
+        .owner-badge {
+            display: inline-block;
+            background: #f59e0b;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+        .member-actions {
+            display: flex;
+            gap: 5px;
+        }
+        .role-form {
+            display: inline;
         }
     </style>
 }

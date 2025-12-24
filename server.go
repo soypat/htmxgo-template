@@ -9,6 +9,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ const (
 	pageUsers
 	pageWorkspaces
 	pageDocuments
+	pageMembers
 )
 
 const activeWorkspaceCookie = "active_workspace"
@@ -124,6 +126,13 @@ func (sv *Server) Init(flags Flags) (err error) {
 	sv.HandleFunc(RoleUser, "POST /documents", sv.handleCreateDocument())
 	sv.HandleFunc(RoleUser, "GET /documents/{id}", sv.handleDocumentView())
 	sv.HandleFunc(RoleUser, "POST /documents/{id}/name", sv.handleUpdateDocumentName())
+
+	// Member management routes (active workspace required).
+	sv.HandleFunc(RoleExternal, "GET /members", sv.handleMembers())
+	sv.HandleFunc(RoleModerator, "POST /members", sv.handleAddMember())
+	sv.HandleFunc(RoleAdmin, "DELETE /members/{id}", sv.handleRemoveMember())
+	sv.HandleFunc(RoleAdmin, "POST /members/{id}/role", sv.handleChangeMemberRole())
+	sv.HandleFunc(RoleOwner, "POST /workspaces/transfer-owner", sv.handleTransferOwnership())
 
 	if flags.DisableSSE {
 		sv.HandleFuncNoWorkspace(RoleUser, "/sse", func(w http.ResponseWriter, r *http.Request, _ RequestContext) { http.Error(w, "sse disabled", 401) })
@@ -217,6 +226,8 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 		rc.Page = pageWorkspaces
 	case "/documents":
 		rc.Page = pageDocuments
+	case "/members":
+		rc.Page = pageMembers
 	}
 	rc.Now = time.Now()
 	return rc
@@ -492,6 +503,148 @@ func (sv *Server) handleUpdateDocumentName() RoleHandlerFunc {
 	}
 }
 
+// Member handlers (require active workspace via HandleFunc middleware).
+
+func (sv *Server) handleMembers() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		sv.servePage(w, r, membersPage(rc), rc)
+	}
+}
+
+// handleAddMember adds an existing user to Workspace.Members and adds the workspace to User.Workspaces.
+func (sv *Server) handleAddMember() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		email := r.FormValue("email")
+		if email == "" {
+			sv.errorShow(rc, "email is required")
+			return
+		}
+		var role Role
+		if err := role.UnmarshalText([]byte(r.FormValue("role"))); err != nil || role > rc.WorkspaceRole {
+			sv.errorShow(rc, "invalid role")
+			return
+		}
+		if slices.ContainsFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.Email == email }) {
+			sv.errorShow(rc, "already a member")
+			return
+		}
+
+		// User must already exist.
+		var user User
+		if err := sv.db.UserByEmail(&user, email); err != nil {
+			sv.errorShow(rc, "user not found")
+			return
+		}
+
+		// Add Member to Workspace.Members.
+		rc.ActiveWorkspace.Members = append(rc.ActiveWorkspace.Members, Member{
+			UserID: user.ID, Email: email, AddedBy: rc.User.ID, JoinedAt: time.Now(), WorkspaceRole: role,
+		})
+		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
+
+		// Add workspace ID to User.Workspaces (bidirectional link).
+		user.Workspaces = append(user.Workspaces, rc.ActiveWorkspace.ID)
+		sv.db.UserUpdate(user)
+
+		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "added " + email})
+		w.Header().Set("HX-Redirect", "/members")
+	}
+}
+
+// handleRemoveMember removes a user from Workspace.Members and removes the workspace from User.Workspaces.
+func (sv *Server) handleRemoveMember() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		memberID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil || memberID == rc.ActiveWorkspace.OwnerID || memberID == rc.User.ID {
+			sv.errorShow(rc, "cannot remove this member")
+			return
+		}
+
+		// Find email before removing.
+		idx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == memberID })
+		if idx == -1 {
+			sv.errorShow(rc, "member not found")
+			return
+		}
+		email := rc.ActiveWorkspace.Members[idx].Email
+		rc.ActiveWorkspace.Members = slices.Delete(rc.ActiveWorkspace.Members, idx, idx+1)
+		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
+
+		// Remove workspace ID from User.Workspaces (bidirectional link).
+		var user User
+		if sv.db.UserByUUID(&user, memberID) == nil {
+			user.Workspaces = slices.DeleteFunc(user.Workspaces, func(wsID uuid.UUID) bool { return wsID == rc.ActiveWorkspace.ID })
+			sv.db.UserUpdate(user)
+		}
+
+		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "removed " + email})
+		w.Header().Set("HX-Redirect", "/members")
+	}
+}
+
+// handleChangeMemberRole updates a member's WorkspaceRole in Workspace.Members.
+func (sv *Server) handleChangeMemberRole() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		memberID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil || memberID == rc.ActiveWorkspace.OwnerID {
+			sv.errorShow(rc, "cannot change this role")
+			return
+		}
+		var newRole Role
+		if err := newRole.UnmarshalText([]byte(r.FormValue("role"))); err != nil || newRole > rc.WorkspaceRole {
+			sv.errorShow(rc, "invalid role")
+			return
+		}
+
+		// Update WorkspaceRole in Workspace.Members.
+		idx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == memberID })
+		if idx == -1 {
+			sv.errorShow(rc, "member not found")
+			return
+		}
+		email := rc.ActiveWorkspace.Members[idx].Email
+		rc.ActiveWorkspace.Members[idx].WorkspaceRole = newRole
+		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
+
+		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: email + " is now " + newRole.String()})
+		w.Header().Set("HX-Redirect", "/members")
+	}
+}
+
+// handleTransferOwnership changes Workspace.OwnerID and adjusts roles.
+func (sv *Server) handleTransferOwnership() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		newOwnerID, err := uuid.Parse(r.URL.Query().Get("to"))
+		if err != nil || newOwnerID == rc.User.ID {
+			sv.errorShow(rc, "invalid transfer target")
+			return
+		}
+
+		// Find new owner and promote to Admin if needed. Demote old owner to Admin.
+		newOwnerIdx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == newOwnerID })
+		if newOwnerIdx == -1 {
+			sv.errorShow(rc, "user is not a member")
+			return
+		}
+		newOwnerEmail := rc.ActiveWorkspace.Members[newOwnerIdx].Email
+		if rc.ActiveWorkspace.Members[newOwnerIdx].WorkspaceRole < RoleAdmin {
+			rc.ActiveWorkspace.Members[newOwnerIdx].WorkspaceRole = RoleAdmin
+		}
+
+		// Demote old owner to Admin.
+		oldOwnerIdx := slices.IndexFunc(rc.ActiveWorkspace.Members, func(m Member) bool { return m.UserID == rc.ActiveWorkspace.OwnerID })
+		if oldOwnerIdx != -1 {
+			rc.ActiveWorkspace.Members[oldOwnerIdx].WorkspaceRole = RoleAdmin
+		}
+
+		rc.ActiveWorkspace.OwnerID = newOwnerID
+		sv.db.WorkspaceUpdate(*rc.ActiveWorkspace)
+
+		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "transferred ownership to " + newOwnerEmail})
+		w.Header().Set("HX-Redirect", "/members")
+	}
+}
+
 // servePage uses the `page` function and serves an entire page to the http response writer with `component` as the core page content.
 func (sv *Server) servePage(w http.ResponseWriter, r *http.Request, component templ.Component, rc RequestContext) {
 	sv.serveComponent(w, r, page(component, rc))
@@ -502,6 +655,10 @@ func (sv *Server) serveComponent(w http.ResponseWriter, r *http.Request, c templ
 	handler := templ.Handler(c)
 	handler.ServeHTTP(w, r)
 	slog.Debug("serveComponent:done", slog.String("req", r.URL.String()))
+}
+
+func (sv *Server) errorShow(rc RequestContext, msg string) {
+	sv.toasts.Send(rc.User.Email, Toast{Level: slog.LevelError, Message: msg})
 }
 
 func (sv *Server) error(w http.ResponseWriter, errstr string, code int) {
