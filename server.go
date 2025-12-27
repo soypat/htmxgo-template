@@ -134,6 +134,7 @@ func (sv *Server) Init(flags Flags) (err error) {
 	sv.HandleFunc(RoleUser, "POST /documents", sv.handleCreateDocument())
 	sv.HandleFunc(RoleUser, "GET /documents/{id}", sv.handleDocumentView())
 	sv.HandleFunc(RoleUser, "POST /documents/{id}/name", sv.handleUpdateDocumentName())
+	sv.HandleFunc(RoleModerator, "DELETE /documents/{id}", sv.handleDeleteDocument())
 
 	// Member management routes (active workspace required).
 	sv.HandleFunc(RoleExternal, "GET /members", sv.handleMembers())
@@ -350,7 +351,7 @@ func (sv *Server) handleCreateWorkspace() RoleHandlerFunc {
 		}
 		// Activate the new workspace.
 		sv.setActiveWorkspace(w, ws.ID)
-		w.Header().Set("HX-Redirect", "/documents")
+		sv.redirect(w, "/documents")
 	}
 }
 
@@ -380,7 +381,7 @@ func (sv *Server) handleActivateWorkspace() RoleHandlerFunc {
 			return
 		}
 		sv.setActiveWorkspace(w, wsID)
-		w.Header().Set("HX-Redirect", "/documents")
+		sv.redirect(w, "/documents")
 	}
 }
 
@@ -525,6 +526,41 @@ func (sv *Server) handleUpdateDocumentName() RoleHandlerFunc {
 	}
 }
 
+func (sv *Server) handleDeleteDocument() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		docID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			sv.errorShow(rc, "invalid document ID", err)
+			return
+		}
+		// Verify document belongs to active workspace.
+		idx := slices.Index(rc.ActiveWorkspace.Documents, docID)
+		if idx == -1 {
+			sv.errorShow(rc, "document not found in workspace", nil)
+			return
+		}
+		// Get document title for toast message.
+		var doc DocumentView
+		if err := sv.db.DocumentViewByUUID(&doc, docID); err != nil {
+			sv.errorShow(rc, "document not found", err)
+			return
+		}
+		// Remove from workspace.
+		rc.ActiveWorkspace.Documents = slices.Delete(rc.ActiveWorkspace.Documents, idx, idx+1)
+		if err := sv.db.WorkspaceUpdate(*rc.ActiveWorkspace); err != nil {
+			sv.errorShow(rc, "failed to update workspace", err)
+			return
+		}
+		// Delete document.
+		if err := sv.db.DocumentDelete(docID); err != nil {
+			sv.errorShow(rc, "failed to delete document", err)
+			return
+		}
+		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "deleted " + doc.Title})
+		sv.redirect(w, "/documents")
+	}
+}
+
 // Member handlers (require active workspace via HandleFunc middleware).
 
 func (sv *Server) handleMembers() RoleHandlerFunc {
@@ -568,7 +604,7 @@ func (sv *Server) handleAddMember() RoleHandlerFunc {
 		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "added " + email})
-		w.Header().Set("HX-Redirect", "/members")
+		sv.redirect(w, "/members")
 	}
 }
 
@@ -596,7 +632,7 @@ func (sv *Server) handleRemoveMember() RoleHandlerFunc {
 		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "removed " + email})
-		w.Header().Set("HX-Redirect", "/members")
+		sv.redirect(w, "/members")
 	}
 }
 
@@ -628,7 +664,7 @@ func (sv *Server) handleChangeMemberRole() RoleHandlerFunc {
 		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: email + " is now " + newRole.String()})
-		w.Header().Set("HX-Redirect", "/members")
+		sv.redirect(w, "/members")
 	}
 }
 
@@ -665,7 +701,7 @@ func (sv *Server) handleTransferOwnership() RoleHandlerFunc {
 		}
 
 		sv.toasts.Send(rc.User.Email, Toast{Level: toastLevelSuccess, Message: "transferred ownership to " + newOwnerEmail})
-		w.Header().Set("HX-Redirect", "/members")
+		sv.redirect(w, "/members")
 	}
 }
 
@@ -688,6 +724,11 @@ func (sv *Server) errorShow(rc RequestContext, contextForUser string, err error)
 		slog.Warn("errorShow", slog.String("ctx", contextForUser), slog.String("email", rc.User.Email), slog.String("page", rc.Page.String()))
 	}
 	sv.toasts.Send(rc.User.Email, Toast{Level: slog.LevelError, Message: contextForUser})
+}
+
+// redirect sets the HX-Redirect header for HTMX responses.
+func (sv *Server) redirect(w http.ResponseWriter, path string) {
+	w.Header().Set("HX-Redirect", path)
 }
 
 // validateCSRF checks the CSRF token from the request against the session token.

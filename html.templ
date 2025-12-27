@@ -215,8 +215,8 @@ templ documentsPage(rc RequestContext, docs []DocumentView) {
 			} else {
 				<ul class="document-list">
 					for _, doc := range docs {
-						<li class="document-item">
-							<a href={ templ.SafeURL("/documents/" + doc.ID.String()) } class="document-link">
+						<li class="document-item" style="display: flex; align-items: center; gap: 0.5rem;">
+							<a href={ templ.SafeURL("/documents/" + doc.ID.String()) } class="document-link" style="flex: 1;">
 								<div class="document-info">
 									<span class="document-title">{ doc.Title }</span>
 									<span class="document-creator">
@@ -227,6 +227,17 @@ templ documentsPage(rc RequestContext, docs []DocumentView) {
 									@compPrettyDiffTime(rc.Now, doc.UpdatedAt)
 								</span>
 							</a>
+							if rc.WorkspaceRole >= RoleModerator {
+								<button
+									class="btn btn-danger btn-sm"
+									hx-delete={ "/documents/" + doc.ID.String() }
+									hx-swap="none"
+									hx-headers={ "{\"X-CSRF-Token\":\"" + rc.CSRFToken + "\"}" }
+									hx-confirm="Delete this document?"
+								>
+									Delete
+								</button>
+							}
 						</li>
 					}
 				</ul>
