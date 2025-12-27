@@ -9,7 +9,7 @@ tool (
 
 require (
 	github.com/a-h/templ v0.3.960
-	github.com/google/uuid v1.6.0
+	github.com/soypat/uuid v0.0.0-20251227125828-510f9036826c
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/oauth2 v0.34.0
 )

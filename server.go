@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/a-h/templ"
-	"github.com/google/uuid"
+	"github.com/soypat/uuid"
 )
 
 // Stores generic information about the request that is commonly used in
@@ -75,6 +75,10 @@ func (sv *Server) Init(flags Flags) (err error) {
 	if err != nil {
 		return err
 	}
+	err = sv.toasts.Init()
+	if err != nil {
+		return err
+	}
 	sv.addr = flags.Addr
 	var devrole Role
 	if flags.DevModeRole != "" {
@@ -85,7 +89,7 @@ func (sv *Server) Init(flags Flags) (err error) {
 	}
 	if devrole.IsValid() {
 		const devEmail = "dev@example.com"
-		usr := User{Email: devEmail, ID: uuid.Max, Provider: "nowhere", Role: devrole}
+		usr := User{Email: devEmail, ID: uuid.Max(), Provider: "nowhere", Role: devrole}
 		err = sv.db.UserCreate(usr)
 		if err != nil {
 			// If user exists then get user and renew role.
@@ -222,7 +226,7 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 		rc.User = User{}
 	}
 	// Load active workspace from cookie if set.
-	if wsID := sv.getActiveWorkspaceID(r); wsID != uuid.Nil {
+	if wsID := sv.getActiveWorkspaceID(r); !wsID.IsZero() {
 		var ws Workspace
 		if err := sv.db.WorkspaceByUUID(&ws, wsID); err == nil {
 			// Verify user is still a member of this workspace.
@@ -231,7 +235,6 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 				rc.ActiveWorkspace = &ws
 			} else {
 				slog.Warn("user-danger", slog.String("mail", rc.User.Email), slog.String("id", rc.User.ID.String()), slog.String("workspaceID", ws.ID.String()))
-				return rc //
 			}
 		}
 	}
@@ -252,15 +255,15 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 	return rc
 }
 
-// getActiveWorkspaceID returns the workspace UUID from the cookie, or uuid.Nil if not set.
+// getActiveWorkspaceID returns the workspace UUID from the cookie, or zero UUID if not set.
 func (sv *Server) getActiveWorkspaceID(r *http.Request) uuid.UUID {
 	cookie, err := r.Cookie(activeWorkspaceCookie)
 	if err != nil {
-		return uuid.Nil
+		return uuid.UUID{}
 	}
 	wsID, err := uuid.Parse(cookie.Value)
 	if err != nil {
-		return uuid.Nil
+		return uuid.UUID{}
 	}
 	return wsID
 }
@@ -324,7 +327,7 @@ func (sv *Server) handleWorkspaces() RoleHandlerFunc {
 func (sv *Server) handleCreateWorkspace() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		ws := Workspace{
-			ID:      uuid.New(),
+			ID:      sv.db.MustID(),
 			OwnerID: rc.User.ID,
 			Name:    r.FormValue("name"),
 			Members: []Member{{
@@ -356,7 +359,7 @@ func (sv *Server) handleActivateWorkspace() RoleHandlerFunc {
 		wsIDStr := r.PathValue("id")
 		wsID, err := uuid.Parse(wsIDStr)
 		if err != nil {
-			sv.error(w, "invalid workspace ID", http.StatusBadRequest)
+			sv.error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		// Verify workspace exists and user is a member.
@@ -437,7 +440,7 @@ func (sv *Server) handleCreateDocument() RoleHandlerFunc {
 		}
 
 		doc := Document{
-			ID:        uuid.New(),
+			ID:        sv.db.MustID(),
 			CreatorID: rc.User.ID,
 			Title:     title,
 			Content:   content,
@@ -693,6 +696,9 @@ func (sv *Server) validateCSRF(r *http.Request, rc RequestContext) bool {
 	token := r.FormValue("csrf_token")
 	if token == "" {
 		token = r.Header.Get("X-CSRF-Token")
+	}
+	if token != rc.CSRFToken {
+		slog.Debug("csrf-mismatch", slog.String("form", token), slog.String("session", rc.CSRFToken), slog.String("url", r.URL.String()))
 	}
 	return token != "" && token == rc.CSRFToken
 }

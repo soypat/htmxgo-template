@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/md5"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"html"
@@ -9,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/soypat/uuid"
 )
 
 // handleSSE establishes a Server-Sent Events connection for real-time toast notifications.
@@ -31,7 +33,7 @@ func (sv *Server) handleSSE() RoleHandlerFunc {
 			http.Error(w, "", http.StatusForbidden)
 			return // Safety return, just in case.
 		}
-		connID := uuid.New().String()[:8]
+		connID := sv.toasts.MustID().String()[:8]
 		email := rc.User.Email
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -165,6 +167,19 @@ type Toast struct {
 type ToastBroker struct {
 	mu      sync.RWMutex
 	clients map[string]map[chan Toast]struct{} // email -> set of channels
+	uuidGen uuid.Generator
+}
+
+func (tb *ToastBroker) Init() error {
+	return tb.uuidGen.Init(uuid.GeneratorConfig{
+		RandSource: rand.Reader,
+		Version:    4,
+		Hash:       md5.New(),
+	})
+}
+
+func (tb *ToastBroker) MustID() uuid.UUID {
+	return tb.uuidGen.MustRandom()
 }
 
 func (tb *ToastBroker) Subscribe(email string) chan Toast {
@@ -194,7 +209,7 @@ func (tb *ToastBroker) Send(email string, toast Toast) (err error) {
 	tb.mu.RLock()
 	defer tb.mu.RUnlock()
 	if toast.ID == "" {
-		toast.ID = uuid.New().String()[:8]
+		toast.ID = tb.MustID().String()[:8]
 	}
 	for ch := range tb.clients[email] {
 		select {
@@ -211,7 +226,7 @@ func (tb *ToastBroker) Broadcast(toast Toast) (err error) {
 	tb.mu.RLock()
 	defer tb.mu.RUnlock()
 	if toast.ID == "" {
-		toast.ID = uuid.New().String()[:8]
+		toast.ID = tb.MustID().String()[:8]
 	}
 	for _, clients := range tb.clients {
 		for ch := range clients {

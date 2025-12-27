@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/soypat/uuid"
 	"go.etcd.io/bbolt"
 )
 
@@ -140,6 +142,7 @@ type Store struct {
 	db          *bbolt.DB
 	mailCacheMu sync.Mutex
 	mailCache   map[string]uuid.UUID
+	uuidGen     uuid.Generator
 }
 
 func (db *Store) cacheMail(mail string, id uuid.UUID) {
@@ -150,6 +153,14 @@ func (db *Store) cacheMail(mail string, id uuid.UUID) {
 
 func (db *Store) Open(filename string) error {
 	db.Close()
+	err := db.uuidGen.Init(uuid.GeneratorConfig{
+		RandSource: rand.Reader,
+		Version:    4,
+		Hash:       md5.New(),
+	})
+	if err != nil {
+		return err
+	}
 	bdb, err := bbolt.Open(filename, 0777, bbolt.DefaultOptions)
 	if err != nil {
 		return err
@@ -189,6 +200,11 @@ func (db *Store) Close() error {
 		return err
 	}
 	return errors.New("database not open")
+}
+
+// MustID generates a new random UUID. Panics on error.
+func (db *Store) MustID() uuid.UUID {
+	return db.uuidGen.MustRandom()
 }
 
 func (db *Store) UserByUUID(dst *User, id uuid.UUID) error {
@@ -563,7 +579,7 @@ func unprintableIndex(data []byte) int {
 }
 
 func validateID(id uuid.UUID) error {
-	if id == (uuid.UUID{}) {
+	if id.IsZero() {
 		return errors.New("zero UUID")
 	}
 	return nil

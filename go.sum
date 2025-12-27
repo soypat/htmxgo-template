@@ -18,8 +18,6 @@ github.com/fsnotify/fsnotify v1.7.0 h1:8JEhPFa5W2WU7YfeZzPNqzMP6Lwt7L2715Ggo0nos
 github.com/fsnotify/fsnotify v1.7.0/go.mod h1:40Bi/Hjc2AVfZrqy+aj+yEI+/bRxZnMJyTJwOpGvigM=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
-github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
-github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/mattn/go-colorable v0.1.13 h1:fFA4WZxdEF4tXPZVKMLwD8oUnCTTo08duU7wxecdEvA=
 github.com/mattn/go-colorable v0.1.13/go.mod h1:7S9/ev0klgBDR4GtXTXX8a3vIGJpMovkB8vQcUbaXHg=
 github.com/mattn/go-isatty v0.0.16/go.mod h1:kYGgaQfpe5nmfYZH+SKPsOc2e4SrIfOl2e/yFXSvRLM=
@@ -29,6 +27,12 @@ github.com/natefinch/atomic v1.0.1 h1:ZPYKxkqQOx3KZ+RsbnP/YsgvxWQPGxjC0oBt2AhwV0
 github.com/natefinch/atomic v1.0.1/go.mod h1:N/D/ELrljoqDyT3rZrsUmtsuzvHkeB/wWjHV22AZRbM=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/soypat/uuid v0.0.0-20251226163620-8b006c8b56e5 h1:MHKyQYvWo2W2+YmSS/BxFJWe0gA2iS3T7La/fg3TxaE=
+github.com/soypat/uuid v0.0.0-20251226163620-8b006c8b56e5/go.mod h1:GyxuRT2yYmvS4f333TJp7IAXiQwtwQtRMKsMIS/ZHO4=
+github.com/soypat/uuid v0.0.0-20251227123232-5caf72988c7d h1:qbpDDCgiIxcBSVaqhpBiV/xnpsNHWxEaRE5vKt7leFo=
+github.com/soypat/uuid v0.0.0-20251227123232-5caf72988c7d/go.mod h1:GyxuRT2yYmvS4f333TJp7IAXiQwtwQtRMKsMIS/ZHO4=
+github.com/soypat/uuid v0.0.0-20251227125828-510f9036826c h1:l1/2WEYNsSchktsjBz2N0OjreZoeAIzuF05hZlhuavI=
+github.com/soypat/uuid v0.0.0-20251227125828-510f9036826c/go.mod h1:GyxuRT2yYmvS4f333TJp7IAXiQwtwQtRMKsMIS/ZHO4=
 github.com/stretchr/testify v1.10.0 h1:Xv5erBjTwe/5IxqUQTdXv5kgmIvbHo3QQyRwhJsOfJA=
 github.com/stretchr/testify v1.10.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
 go.etcd.io/bbolt v1.4.3 h1:dEadXpI6G79deX5prL3QRNP6JB8UxVkqo4UPnHaNXJo=

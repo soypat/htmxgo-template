@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -228,6 +229,7 @@ func rand32String() string {
 // DevAuth is a simple auth for development that auto-logs in with a fixed email.
 type DevAuth struct {
 	Email     string
+	csrfOnce  sync.Once
 	csrfToken string
 }
 
@@ -236,9 +238,9 @@ func (d *DevAuth) GetEmail(r *http.Request) string {
 }
 
 func (d *DevAuth) GetCSRFToken(r *http.Request) string {
-	if d.csrfToken == "" {
+	d.csrfOnce.Do(func() {
 		d.csrfToken = rand32String()
-	}
+	})
 	return d.csrfToken
 }
 
