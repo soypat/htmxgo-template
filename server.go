@@ -327,7 +327,7 @@ func (sv *Server) handleWorkspaces() RoleHandlerFunc {
 func (sv *Server) handleCreateWorkspace() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
 		ws := Workspace{
-			ID:      sv.db.MustID(),
+			ID:      sv.db.NewID(),
 			OwnerID: rc.User.ID,
 			Name:    r.FormValue("name"),
 			Members: []Member{{
@@ -440,7 +440,7 @@ func (sv *Server) handleCreateDocument() RoleHandlerFunc {
 		}
 
 		doc := Document{
-			ID:        sv.db.MustID(),
+			ID:        sv.db.NewID(),
 			CreatorID: rc.User.ID,
 			Title:     title,
 			Content:   content,

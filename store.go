@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/mail"
 	"sync"
 	"time"
@@ -202,9 +203,14 @@ func (db *Store) Close() error {
 	return errors.New("database not open")
 }
 
-// MustID generates a new random UUID. Panics on error.
-func (db *Store) MustID() uuid.UUID {
-	return db.uuidGen.MustRandom()
+// NewID generates a new random UUID. Panics on error.
+func (db *Store) NewID() uuid.UUID {
+	id, err := db.uuidGen.NewRandom()
+	if err != nil {
+		slog.Error("CRITICAL:NewID", slog.String("err", err.Error()))
+		panic(err)
+	}
+	return id
 }
 
 func (db *Store) UserByUUID(dst *User, id uuid.UUID) error {
