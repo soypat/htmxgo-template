@@ -144,9 +144,9 @@ func (sv *Server) Init(flags Flags) (err error) {
 	sv.HandleFunc(RoleOwner, "POST /workspaces/transfer-owner", sv.handleTransferOwnership())
 
 	if flags.DisableSSE {
-		sv.HandleFuncNoWorkspace(RoleUser, "/sse", func(w http.ResponseWriter, r *http.Request, _ RequestContext) { http.Error(w, "sse disabled", 401) })
+		sv.HandleFuncNoWorkspace(0, "/sse", func(w http.ResponseWriter, r *http.Request, _ RequestContext) { http.Error(w, "sse disabled", 401) })
 	} else {
-		sv.HandleFuncNoWorkspace(RoleUser, "/sse", sv.handleSSE())
+		sv.HandleFuncNoWorkspace(0, "/sse", sv.handleSSE())
 	}
 
 	return nil
@@ -192,12 +192,12 @@ func (sv *Server) HandleFuncNoWorkspace(requiredClearance Role, parentPattern st
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
 		}
-		if sv.auth.GetEmail(r) == "" {
+		if requiredClearance != 0 && sv.auth.GetEmail(r) == "" {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
 		rc := sv.RenderContext(w, r)
-		if !rc.User.HasClearance(requiredClearance) {
+		if requiredClearance != 0 && !rc.User.HasClearance(requiredClearance) {
 			http.NotFound(w, r)
 			return
 		}

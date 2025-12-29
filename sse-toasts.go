@@ -29,12 +29,10 @@ import (
 // events (not request-specific), and showing them across all tabs improves UX.
 func (sv *Server) handleSSE() RoleHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
-		if rc.User.Role < RoleUser {
-			http.Error(w, "", http.StatusForbidden)
-			return // Safety return, just in case.
-		}
 		connID := sv.toasts.NewID().String()[:8]
 		email := rc.User.Email
+		mustClose := email == "" || rc.User.Role.Canon() < RoleExternal
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -44,6 +42,16 @@ func (sv *Server) handleSSE() RoleHandlerFunc {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer flusher.Flush()
+		if mustClose {
+			w.Write([]byte(": connected\n\nevent:close\ndata: unauthorized\n\n"))
+			return
+			// Immediate heartbeat on connect - critical for fast stale connection detection
+		} else if _, err := w.Write([]byte(": connected\n\n")); err != nil {
+			slog.Debug("sse initial write failed", slog.String("conn", connID), slog.String("err", err.Error()))
+			return
+		}
+		flusher.Flush()
 
 		ch := sv.toasts.Subscribe(email)
 		defer sv.toasts.Unsubscribe(email, ch)
@@ -65,11 +73,6 @@ func (sv *Server) handleSSE() RoleHandlerFunc {
 		heartbeat := time.NewTicker(15 * time.Second)
 		defer heartbeat.Stop()
 
-		// Immediate heartbeat on connect - critical for fast stale connection detection
-		if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
-			slog.Debug("sse initial write failed", slog.String("conn", connID), slog.String("err", err.Error()))
-			return
-		}
 		flusher.Flush()
 
 		for {
