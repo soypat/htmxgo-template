@@ -427,21 +427,30 @@ templ page(component templ.Component, rc RequestContext) {
         // is capped at 6 for most browsers one can hang the page indefinetely which leads to terrible UX.
         // To understand why this is VERY necessary remove this code and quickly navigate between 7 different page loads.
         var sseSource = null;
-        closeSSE = function(msg) {
+        closeSSE = function(msg, permanent) {
+            nulled = false;
             if (sseSource) {
                 sseSource.close();
                 sseSource = null;
-                console.log("closeSSE:", msg);
-            } else {
-                 console.log("closeSSE(nil):", msg);
+                nulled=true
+            }
+            console.log("closeSSE(", nulled ,"):", msg, ": perm=", permanent);
+            if (permanent) {
+                document.body.removeAttribute('sse-connect'); // Remove sse-connect to prevent HTMX from reconnecting
             }
         }
         document.body.addEventListener('htmx:sseOpen', function(e) {
             sseSource = e.detail.source;
         });
-        // Handle SSE connection errors - close and prevent retries
+        // Handle sse-close event (server requested close) - permanently disable SSE
+        document.body.addEventListener('htmx:sseClose', function(e) {
+            if (e.detail.type === 'message') {
+                closeSSE("htmx:sseClose", true);
+            }
+        });
+        // Handle SSE connection errors
         document.body.addEventListener('htmx:sseError', function(e) {
-            closeSSE("htmx:sseError");
+            closeSSE("htmx:sseError", true);
         });
         // Close SSE connection explicitly on navigation.
         // Removing attributes does NOT close the EventSource - must call .close()

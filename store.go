@@ -115,15 +115,18 @@ func (u *User) HasClearance(requiredClearance Role) bool {
 }
 
 func (u *User) validateForUpdate() error {
+	if u.Email == "" {
+		return errors.New("empty email")
+	}
 	if err := validateID(u.ID); err != nil {
 		return err
 	}
 	if !u.Role.IsValid() {
 		return errors.New("invalid user role")
-	} else if u.Provider != "nowhere" && u.Provider != "google" {
-		return errors.New("invalid user provider")
 	} else if u.Provider == "" {
 		return errors.New("provider not set")
+	} else if u.Provider != "nowhere" && u.Provider != "google" {
+		return errors.New("invalid user provider: " + u.Provider)
 	}
 	_, err := mail.ParseAddress(u.Email)
 	if err != nil {

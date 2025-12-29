@@ -21,6 +21,7 @@ import (
 // frontend rendering or within API endpoint logic.
 type RequestContext struct {
 	User            User
+	Authenticated   bool
 	Page            Page
 	ActiveWorkspace *Workspace
 	WorkspaceRole   Role
@@ -118,7 +119,26 @@ func (sv *Server) Init(flags Flags) (err error) {
 	sv.router = http.NewServeMux()
 	sv.HandleFuncNoAuth("/", sv.handleLanding())
 	sv.HandleFuncNoAuth("/login", sv.auth.HandleLogin)
-	sv.HandleFuncNoAuth("/auth/callback", sv.auth.HandleCallback)
+	sv.HandleFuncNoAuth("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+		sess, ok := sv.auth.HandleCallback(w, r)
+		if !ok {
+			return
+		}
+		var usr User
+		err = sv.db.UserByEmail(&usr, sess.Email)
+		if err != nil {
+			usr := User{
+				Email:    sess.Email,
+				ID:       sv.db.NewID(),
+				Role:     RoleUser,
+				Provider: sess.Provider,
+			}
+			err = sv.db.UserCreate(usr)
+			if err != nil {
+				slog.Error("failed to create user", slog.String("err", err.Error()), slog.Any("user", usr))
+			}
+		}
+	})
 	sv.HandleFuncNoAuth("/logout", sv.auth.HandleLogout)
 	sv.HandleFuncNoWorkspace(RoleAdmin, "GET /users", sv.handleUsers())
 	sv.HandleFuncNoWorkspace(RoleAdmin, "POST /users/send-toast", sv.handleSendUserToast())
@@ -161,7 +181,8 @@ func (sv *Server) HandleFunc(requiredClearance Role, parentPattern string, handl
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
 		}
-		if sv.auth.GetEmail(r) == "" {
+		_, ok := sv.auth.GetSession(r)
+		if !ok {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -192,12 +213,12 @@ func (sv *Server) HandleFuncNoWorkspace(requiredClearance Role, parentPattern st
 		if r.Header.Get("No-Log") != "true" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			slog.Debug("Server:handle", slog.String("url", r.URL.String()), slog.String("handler", parentPattern), slog.String("addr", r.RemoteAddr))
 		}
-		if requiredClearance != 0 && sv.auth.GetEmail(r) == "" {
+		rc := sv.RenderContext(w, r)
+		if requiredClearance > 0 && !rc.Authenticated {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		rc := sv.RenderContext(w, r)
-		if requiredClearance != 0 && !rc.User.HasClearance(requiredClearance) {
+		if requiredClearance > 0 && !rc.User.HasClearance(requiredClearance) {
 			http.NotFound(w, r)
 			return
 		}
@@ -222,22 +243,27 @@ func (sv *Server) HandleFuncNoAuth(parentPattern string, handler func(http.Respo
 }
 
 func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc RequestContext) {
-	err := sv.db.UserByEmail(&rc.User, sv.auth.GetEmail(r))
-	if err != nil {
-		rc.User = User{}
-	}
-	// Load active workspace from cookie if set.
-	if wsID := sv.getActiveWorkspaceID(r); !wsID.IsZero() {
-		var ws Workspace
-		if err := sv.db.WorkspaceByUUID(&ws, wsID); err == nil {
-			// Verify user is still a member of this workspace.
-			rc.WorkspaceRole = rc.User.WorkspaceRole(&ws)
-			if rc.WorkspaceRole.IsValid() {
-				rc.ActiveWorkspace = &ws
-			} else {
-				slog.Warn("user-danger", slog.String("mail", rc.User.Email), slog.String("id", rc.User.ID.String()), slog.String("workspaceID", ws.ID.String()))
+	sess, ok := sv.auth.GetSession(r)
+	if ok {
+		err := sv.db.UserByEmail(&rc.User, sess.Email)
+		if err != nil {
+			rc.User = User{}
+		}
+		// Load active workspace from cookie if set.
+		if wsID := sv.getActiveWorkspaceID(r); !wsID.IsZero() {
+			var ws Workspace
+			if err := sv.db.WorkspaceByUUID(&ws, wsID); err == nil {
+				// Verify user is still a member of this workspace.
+				rc.WorkspaceRole = rc.User.WorkspaceRole(&ws)
+				if rc.WorkspaceRole.IsValid() {
+					rc.ActiveWorkspace = &ws
+				} else {
+					slog.Warn("user-danger", slog.String("mail", rc.User.Email), slog.String("id", rc.User.ID.String()), slog.String("workspaceID", ws.ID.String()))
+				}
 			}
 		}
+		rc.CSRFToken = sess.CSRFToken
+		rc.Authenticated = true
 	}
 	switch r.RequestURI {
 	case "/":
@@ -251,7 +277,6 @@ func (sv *Server) RenderContext(w http.ResponseWriter, r *http.Request) (rc Requ
 	case "/members":
 		rc.Page = pageMembers
 	}
-	rc.CSRFToken = sv.auth.GetCSRFToken(r)
 	rc.Now = time.Now()
 	return rc
 }

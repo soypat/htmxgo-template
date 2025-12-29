@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -66,10 +68,9 @@ const (
 type RoleHandlerFunc func(w http.ResponseWriter, r *http.Request, rc RequestContext)
 
 type Authenticator interface {
-	GetEmail(r *http.Request) string
-	GetCSRFToken(r *http.Request) string
+	GetSession(r *http.Request) (AuthSession, bool)
 	HandleLogin(w http.ResponseWriter, r *http.Request)
-	HandleCallback(w http.ResponseWriter, r *http.Request)
+	HandleCallback(w http.ResponseWriter, r *http.Request) (AuthSession, bool)
 	HandleLogout(w http.ResponseWriter, r *http.Request)
 }
 
@@ -78,10 +79,15 @@ type Auth struct {
 	sessions map[string]*AuthSession // token -> session
 }
 
+var _ Authenticator = (*Auth)(nil) // compile time guarantee of interface implementation.
+
 type AuthSession struct {
-	Email     string
-	CSRFToken string
-	ExpiresAt time.Time
+	Email        string
+	CSRFToken    string
+	Provider     string
+	Picture      string
+	VerifiedMail bool
+	ExpiresAt    time.Time
 }
 
 func (auth *Auth) Config(cfg Flags) error {
@@ -106,57 +112,42 @@ func (auth *Auth) Config(cfg Flags) error {
 }
 
 // GetEmail returns the email from the session, or empty if not logged in.
-func (a *Auth) GetEmail(r *http.Request) string {
+func (a *Auth) GetSession(r *http.Request) (AuthSession, bool) {
 	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return ""
+	if err != nil || cookie.Value == "" {
+		return AuthSession{}, false
 	}
 
 	sess, ok := a.sessions[cookie.Value]
 	if !ok || time.Now().After(sess.ExpiresAt) {
-		return ""
+		return AuthSession{}, false
 	}
-	return sess.Email
-}
-
-// GetCSRFToken returns the CSRF token for the session, or empty if not logged in.
-func (a *Auth) GetCSRFToken(r *http.Request) string {
-	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return ""
-	}
-
-	sess, ok := a.sessions[cookie.Value]
-	if !ok || time.Now().After(sess.ExpiresAt) {
-		return ""
-	}
-	return sess.CSRFToken
+	return *sess, true
 }
 
 // HandleLogin redirects to Google OAuth.
 func (a *Auth) HandleLogin(w http.ResponseWriter, r *http.Request) {
-	sessionToken := rand32String()
-
+	state := rand32String()
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookie,
-		Value:    sessionToken,
+		Value:    state,
 		Path:     "/",
 		MaxAge:   300,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-
-	url := a.oauth.AuthCodeURL(sessionToken)
+	slog.Info("oauth-login", slog.String("state", state))
+	url := a.oauth.AuthCodeURL(state)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
 // HandleCallback handles the OAuth callback.
-func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
+func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) (AuthSession, bool) {
 	// Verify state
 	stateCookie, err := r.Cookie(stateCookie)
 	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
 		http.Error(w, "invalid state", http.StatusBadRequest)
-		return
+		return AuthSession{}, false
 	}
 
 	// Exchange code for token
@@ -164,7 +155,7 @@ func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	token, err := a.oauth.Exchange(context.Background(), code)
 	if err != nil {
 		http.Error(w, "failed to exchange token", http.StatusInternalServerError)
-		return
+		return AuthSession{}, false
 	}
 
 	// Get user info
@@ -172,25 +163,33 @@ func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
 	if err != nil {
 		http.Error(w, "failed to get user info", http.StatusInternalServerError)
-		return
+		return AuthSession{}, false
 	}
 	defer resp.Body.Close()
 
 	var userInfo struct {
-		Email string `json:"email"`
+		Email         string `json:"email"`
+		VerifiedEmail bool   `json:"verified_email"`
+		Picture       string `json:"picture"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+	data, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(data, &userInfo); err != nil {
 		http.Error(w, "failed to decode user info", http.StatusInternalServerError)
-		return
+		return AuthSession{}, false
 	}
 
 	// Create session
 	sessionToken := rand32String()
-	a.sessions[sessionToken] = &AuthSession{
-		Email:     userInfo.Email,
-		CSRFToken: rand32String(),
-		ExpiresAt: time.Now().Add(24 * time.Hour),
+	sess := &AuthSession{
+		Email:        userInfo.Email,
+		Provider:     "google",
+		CSRFToken:    rand32String(),
+		Picture:      userInfo.Picture,
+		VerifiedMail: userInfo.VerifiedEmail,
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
 	}
+	a.sessions[sessionToken] = sess
+	slog.Info("oauth-login-callback", slog.String("email", userInfo.Email), slog.String("provider", sess.Provider), slog.String("state", stateCookie.Value), slog.String("token", sessionToken))
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -202,11 +201,17 @@ func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	})
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+	return *sess, true
 }
 
 // HandleLogout clears the session.
 func (a *Auth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(sessionCookie)
+	sess, ok := a.GetSession(r)
+	if !ok {
+		slog.Warn("not-logged-in-for-logout")
+		return
+	}
 	if err == nil {
 		delete(a.sessions, cookie.Value)
 	}
@@ -217,6 +222,7 @@ func (a *Auth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge: -1,
 	})
 
+	slog.Info("oauth-logout", slog.String("email", sess.Email), slog.String("token", cookie.Value))
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -231,25 +237,31 @@ type DevAuth struct {
 	Email     string
 	csrfOnce  sync.Once
 	csrfToken string
+	expires   time.Time
 }
 
-func (d *DevAuth) GetEmail(r *http.Request) string {
-	return d.Email
-}
+var _ Authenticator = (*DevAuth)(nil) // compile time guarantee of interface implementation.
 
-func (d *DevAuth) GetCSRFToken(r *http.Request) string {
+func (d *DevAuth) GetSession(r *http.Request) (AuthSession, bool) {
 	d.csrfOnce.Do(func() {
 		d.csrfToken = rand32String()
+		d.expires = time.Now().Add(time.Hour * 200)
 	})
-	return d.csrfToken
+	return AuthSession{
+		Email:     d.Email,
+		CSRFToken: d.csrfToken,
+		Provider:  "nowhere",
+		ExpiresAt: d.expires,
+	}, true
 }
 
 func (d *DevAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (d *DevAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
+func (d *DevAuth) HandleCallback(w http.ResponseWriter, r *http.Request) (AuthSession, bool) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+	return d.GetSession(r)
 }
 
 func (d *DevAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
