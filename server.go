@@ -65,7 +65,8 @@ func (sv *Server) Run() error {
 }
 
 func (sv *Server) Init(flags Flags) (err error) {
-	slog.Debug("Server.Init")
+	redirectURL := "http://" + flags.Host + "/auth/callback"
+	slog.Debug("Server.Init", slog.String("auth-redirect-url", redirectURL))
 	if sv.router != nil {
 		return errors.New("Server already initialized")
 	} else if len(flags.Addr) == 0 {
@@ -108,7 +109,7 @@ func (sv *Server) Init(flags Flags) (err error) {
 		slog.Warn("developer-mode")
 	} else {
 		var auth Auth
-		err = auth.Config(flags)
+		err = auth.Config(flags, redirectURL)
 		sv.auth = &auth
 		slog.Warn("PRODUCTION-MODE")
 	}

@@ -107,11 +107,11 @@ type AuthSession struct {
 	ExpiresAt    time.Time
 }
 
-func (auth *Auth) Config(cfg Flags) error {
+func (auth *Auth) Config(cfg Flags, redirectURL string) error {
 	if cfg.ClientID == "" || cfg.ClientSecret == "" {
 		return errors.New("empty client secret/id for OAuth")
 	}
-	_, err := url.Parse(cfg.RedirectURL)
+	_, err := url.Parse(redirectURL)
 	if err != nil {
 		return err
 	}
@@ -119,7 +119,7 @@ func (auth *Auth) Config(cfg Flags) error {
 		oauth: &oauth2.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
-			RedirectURL:  cfg.RedirectURL,
+			RedirectURL:  redirectURL,
 			Scopes:       []string{"email"},
 			Endpoint:     google.Endpoint,
 		},

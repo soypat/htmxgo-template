@@ -19,6 +19,7 @@ type Flags struct {
 	DisableSSE bool
 	LogLevel   int
 	Addr       string
+	Host       string
 
 	// OAuth client ID.
 	ClientID string
@@ -34,14 +35,24 @@ const (
 )
 
 func run() error {
+	addr := os.Getenv("ADDR")
+	host := os.Getenv("HOST")
+	if addr == "" {
+		addr = "localhost:8080"
+	}
+	if host == "" {
+		host = addr
+	}
 	var flags Flags
 	flag.StringVar(&flags.DevModeRole, "dev", "", "Developer mode role from available: ['external', 'user', 'mod', 'admin', 'owner'].")
 	flag.BoolVar(&flags.DisableSSE, "disable-sse", false, "Disable SSE events (toasts).")
 	flag.StringVar(&flags.Addr, "http", ":8080", "Address on which to host HTTP server.")
+	flag.StringVar(&flags.Host, "host", host, "Domain on which server runs. Used for auth redirects.")
+
 	flag.StringVar(&flags.ClientSecret, "oauth-secret", "", "OAuth client secret. DO NOT SET FLAG. Set via Environment "+envSecret)
 	flag.StringVar(&flags.ClientID, "oauth-cid", os.Getenv(envID), "OAuth client ID.")
 	flag.IntVar(&flags.LogLevel, "log", int(slog.LevelDebug), fmt.Sprintf("Logging level. DEBUG=%d INFO=%d WARN=%d ERROR=%d", slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError))
-	flag.StringVar(&flags.RedirectURL, "oauth-redirect", "http://localhost:8080/auth/callback", "Redirect URL for OAuth at /auth/callback endpoint. For local development is http://localhost:8080/auth/callback")
+
 	flag.Parse()
 	if flags.ClientSecret != "" {
 		return errors.New("client secret flag set only for documentation purposes. Set environment: " + envSecret)
