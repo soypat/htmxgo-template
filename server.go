@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/a-h/templ"
@@ -49,9 +50,10 @@ type Server struct {
 	router *http.ServeMux
 	addr   string
 	// table stores data
-	db     Store
-	auth   Authenticator
-	toasts ToastBroker
+	db       Store
+	auth     Authenticator
+	toasts   ToastBroker
+	hijacked atomic.Int64
 }
 
 func (sv *Server) Run() error {
@@ -118,7 +120,9 @@ func (sv *Server) Init(flags Flags) (err error) {
 	}
 
 	sv.router = http.NewServeMux()
-	sv.HandleFuncNoAuth("/", sv.handleLanding())
+	sv.router.HandleFunc("/favicon.ico", handleFavicon)
+	// Drop those pesky web scrapers.
+	sv.router.HandleFunc("/", sv.handleLanding())
 	sv.HandleFuncNoAuth("/login", sv.auth.HandleLogin)
 	sv.HandleFuncNoAuth("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
 		sess, ok := sv.auth.HandleCallback(w, r)
@@ -321,6 +325,29 @@ func (sv *Server) clearActiveWorkspace(w http.ResponseWriter) {
 
 func (sv *Server) handleLanding() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			// Is very likely a scraper/bot trying to get access to data.
+			var tcpClosed bool
+			inprocess := sv.hijacked.Load()
+			// Check if too many in-process hijacks or compare and swap failed.
+			if inprocess < 200 && sv.hijacked.CompareAndSwap(inprocess, inprocess+1) {
+				if jacked, ok := w.(http.Hijacker); ok {
+					c, _, err := jacked.Hijack()
+					if err == nil {
+						time.Sleep(10 * time.Second)
+						c.Close()
+						tcpClosed = true
+						for inprocess := sv.hijacked.Load(); sv.hijacked.CompareAndSwap(inprocess, inprocess-1); inprocess = sv.hijacked.Load() {
+						}
+					}
+				}
+			}
+			if !tcpClosed {
+				w.WriteHeader(http.StatusNotFound)
+			}
+			slog.Info("hijack", slog.Bool("success", tcpClosed), slog.String("url", r.URL.Path))
+			return
+		}
 		sv.servePage(w, r, landingPage(sv.RenderContext(w, r)), sv.RenderContext(w, r))
 	}
 }
@@ -873,3 +900,11 @@ func fmtSeconds(s float64) (fmted string) {
 	}
 	return fmted
 }
+
+func handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write([]byte(faviconSVG))
+}
+
+const faviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#3498db"/><path d="M8 10h16M8 16h12M8 22h14" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>`
