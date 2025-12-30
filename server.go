@@ -337,15 +337,21 @@ func (sv *Server) handleLanding() http.HandlerFunc {
 						time.Sleep(10 * time.Second)
 						c.Close()
 						tcpClosed = true
-						for inprocess := sv.hijacked.Load(); sv.hijacked.CompareAndSwap(inprocess, inprocess-1); inprocess = sv.hijacked.Load() {
+						for inprocess := sv.hijacked.Load(); !sv.hijacked.CompareAndSwap(inprocess, inprocess-1); inprocess = sv.hijacked.Load() {
 						}
+					} else {
+						slog.Error("hijack-failed", slog.String("err", err.Error()))
 					}
+				} else {
+					slog.Error("hijack-failed", slog.String("err", "hijacker interface not implemented"))
 				}
+			} else {
+				slog.Error("hijack-failed", slog.Int64("inprocess", int64(inprocess)), slog.Int64("actual-inprocess", int64(sv.hijacked.Load())))
 			}
 			if !tcpClosed {
 				w.WriteHeader(http.StatusNotFound)
 			}
-			slog.Info("hijack", slog.Bool("success", tcpClosed), slog.String("url", r.URL.Path))
+			slog.Info("hijack", slog.Bool("success", tcpClosed), slog.String("url", r.URL.Path), slog.Int("prev-inprocess", int(inprocess)), slog.Int("now-inprocess", int(sv.hijacked.Load())))
 			return
 		}
 		sv.servePage(w, r, landingPage(sv.RenderContext(w, r)), sv.RenderContext(w, r))
