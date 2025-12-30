@@ -141,6 +141,8 @@ func (sv *Server) Init(flags Flags) (err error) {
 	})
 	sv.HandleFuncNoAuth("/logout", sv.auth.HandleLogout)
 	sv.HandleFuncNoWorkspace(RoleAdmin, "GET /users", sv.handleUsers())
+	sv.HandleFuncNoWorkspace(RoleAdmin, "POST /users/{id}/role", sv.handleChangeUserRole())
+	sv.HandleFuncNoWorkspace(RoleAdmin, "DELETE /users/{id}", sv.handleDeleteUser())
 	sv.HandleFuncNoWorkspace(RoleAdmin, "POST /users/send-toast", sv.handleSendUserToast())
 
 	// Workspace management (no active workspace required).
@@ -334,6 +336,64 @@ func (sv *Server) handleUsers() RoleHandlerFunc {
 			return
 		}
 		sv.servePage(w, r, usersPage(rc, users), rc)
+	}
+}
+
+func (sv *Server) handleChangeUserRole() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		userID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			sv.errorShow(rc, "invalid user ID", err)
+			return
+		}
+		// Cannot change own role.
+		if userID == rc.User.ID {
+			sv.errorShow(rc, "cannot change your own role", nil)
+			return
+		}
+		var user User
+		if err := sv.db.UserByUUID(&user, userID); err != nil {
+			sv.errorShow(rc, "user not found", err)
+			return
+		}
+		var role Role
+		if err := role.UnmarshalText([]byte(r.FormValue("role"))); err != nil {
+			sv.errorShow(rc, "invalid role", err)
+			return
+		}
+		user.Role = role
+		if err := sv.db.UserUpdate(user); err != nil {
+			sv.errorShow(rc, "failed to update user", err)
+			return
+		}
+		sv.toasts.Send(rc.User.Email, Toast{Level: LevelSuccess, Message: "updated " + user.Email + " to " + role.String()})
+		sv.redirect(w, "/users")
+	}
+}
+
+func (sv *Server) handleDeleteUser() RoleHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, rc RequestContext) {
+		userID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			sv.errorShow(rc, "invalid user ID", err)
+			return
+		}
+		// Cannot delete self.
+		if userID == rc.User.ID {
+			sv.errorShow(rc, "cannot delete yourself", nil)
+			return
+		}
+		var user User
+		if err := sv.db.UserByUUID(&user, userID); err != nil {
+			sv.errorShow(rc, "user not found", err)
+			return
+		}
+		if err := sv.db.UserDelete(userID); err != nil {
+			sv.errorShow(rc, "failed to delete user", err)
+			return
+		}
+		sv.toasts.Send(rc.User.Email, Toast{Level: LevelSuccess, Message: "deleted " + user.Email})
+		sv.redirect(w, "/users")
 	}
 }
 

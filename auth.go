@@ -25,6 +25,19 @@ const (
 
 type Role int
 
+const (
+	roleUndefined Role = iota // undefined
+	RoleExternal              // external
+	RoleUser                  // user
+	RoleModerator             // mod
+	RoleAdmin                 // admin
+
+	// RoleOwner is the maximum role. Keep new roles under this unless adding something like "god-emperor"
+	// On changing this max value make sure to change enum marshalling call.
+	RoleOwner // owner
+	roleEnd   // not-a-real-role
+)
+
 func (enum Role) MarshalJSON() ([]byte, error) { return []byte(strconv.Quote(enum.String())), nil }
 
 func (enum *Role) UnmarshalJSON(b []byte) error {
@@ -52,18 +65,22 @@ func (role Role) Canon() Role {
 	return 0
 }
 
-const (
-	roleUndefined Role = iota // undefined
-	RoleExternal              // external
-	RoleUser                  // user
-	RoleModerator             // mod
-	RoleAdmin                 // admin
-
-	// RoleOwner is the maximum role. Keep new roles under this unless adding something like "god-emperor"
-	// On changing this max value make sure to change enum marshalling call.
-	RoleOwner // owner
-	roleEnd   // not-a-real-role
-)
+// Level returns a slog.Level for badge coloring. Higher role = higher level.
+func (role Role) Level() (lvl slog.Level) {
+	switch role {
+	case RoleOwner, RoleAdmin:
+		lvl = slog.LevelError
+	case RoleModerator:
+		lvl = slog.LevelWarn
+	case RoleUser:
+		lvl = slog.LevelInfo
+	case RoleExternal:
+		lvl = LevelSuccess
+	default:
+		lvl = slog.LevelDebug
+	}
+	return lvl
+}
 
 type RoleHandlerFunc func(w http.ResponseWriter, r *http.Request, rc RequestContext)
 

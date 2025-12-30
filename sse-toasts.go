@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/rand"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"html"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,17 +44,57 @@ func (sv *Server) handleSSE() RoleHandlerFunc {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
-		defer flusher.Flush()
-		if mustClose {
-			w.Write([]byte(": connected\n\nevent:close\ndata: unauthorized\n\n"))
-			return
-			// Immediate heartbeat on connect - critical for fast stale connection detection
-		} else if _, err := w.Write([]byte(": connected\n\n")); err != nil {
+
+		// Heapless SSE implementation simple enough to keep inline in the handling function.
+		type event string
+		const (
+			evComment event = ""
+			evStatus  event = "status"
+			evToast   event = "toast"
+			evClose   event = "close"
+		)
+		var id int64
+		var sendBuf []byte = make([]byte, 64)
+		sendEvent := func(ev event, data []byte) error {
+			sendBuf = sendBuf[:0]
+			if ev == evComment {
+				sendBuf = append(sendBuf, ": "...)
+				sendBuf = append(sendBuf, data...)
+			} else {
+				id++
+				sendBuf = append(sendBuf, "id:"...)
+				sendBuf = strconv.AppendInt(sendBuf, id, 10)
+				sendBuf = append(sendBuf, '\n')
+				sendBuf = append(sendBuf, "event: "...)
+				sendBuf = append(sendBuf, ev...)
+				sendBuf = append(sendBuf, '\n')
+				if len(data) > 0 {
+					sendBuf = append(sendBuf, "data: "...)
+					sendBuf = append(sendBuf, data...)
+				}
+			}
+			sendBuf = append(sendBuf, "\n\n"...)
+			_, err := w.Write(sendBuf)
+			if err != nil {
+				return err
+			}
+			flusher.Flush()
+			return nil
+		}
+
+		// Immediate heartbeat on connect - critical for fast stale connection detection.
+		err := sendEvent(evComment, []byte("heartbeat"))
+		if err != nil {
 			slog.Debug("sse initial write failed", slog.String("conn", connID), slog.String("err", err.Error()))
 			return
 		}
-		flusher.Flush()
+		// Close immediately for unauthorized users - tells client not to reconnect.
+		if mustClose {
+			sendEvent(evClose, []byte("unauthorized"))
+			return
+		}
 
+		// Subscribe AFTER initial write succeeds - avoids allocating channel for failed connections.
 		ch := sv.toasts.Subscribe(email)
 		defer sv.toasts.Unsubscribe(email, ch)
 
@@ -69,36 +111,29 @@ func (sv *Server) handleSSE() RoleHandlerFunc {
 		// - These "zombie" handlers consume the browser's 6-connection limit, blocking page loads
 		//
 		// Solution: Send heartbeats frequently. If client is gone, write eventually fails.
-		// We send one immediately on connect to detect stale connections ASAP.
 		heartbeat := time.NewTicker(15 * time.Second)
 		defer heartbeat.Stop()
-
-		flusher.Flush()
-
+		var b bytes.Buffer
 		for {
 			select {
 			case toast := <-ch:
-				var lvlstr = "SUCCESS"
-				if toast.Level != toastLevelSuccess {
-					lvlstr = toast.Level.String()
-				}
-				_, err := fmt.Fprintf(w, "event: toast\ndata: <div class=\"toast toast-%s\" id=\"toast-%s\">%s</div>\n\n",
-					html.EscapeString(lvlstr),
+				b.Reset()
+				fmt.Fprintf(&b, "<div class=\"toast %s\" id=\"toast-%s\">%s</div>",
+					BgClass(toast.Level),
 					html.EscapeString(toast.ID),
 					html.EscapeString(toast.Message))
+				err = sendEvent(evToast, b.Bytes())
 				if err != nil {
 					slog.Debug("sse write failed", slog.String("conn", connID), slog.String("err", err.Error()))
 					return
 				}
-				flusher.Flush()
 
 			case <-heartbeat.C:
-				_, err := fmt.Fprintf(w, ": heartbeat\n\n")
+				err = sendEvent(evComment, []byte("heartbeat"))
 				if err != nil {
 					slog.Debug("sse heartbeat failed", slog.String("conn", connID), slog.String("err", err.Error()))
 					return
 				}
-				flusher.Flush()
 
 			case <-r.Context().Done():
 				slog.Debug("sse context done", slog.String("conn", connID), slog.String("err", r.Context().Err().Error()))
@@ -249,4 +284,22 @@ func (tb *ToastBroker) Broadcast(toast Toast) (err error) {
 		}
 	}
 	return err
+}
+
+const LevelSuccess = slog.LevelInfo - 1
+
+// BgClass returns the CSS background class for a slog.Level.
+func BgClass(lvl slog.Level) string {
+	switch lvl {
+	case LevelSuccess:
+		return "bg-SUCCESS"
+	case slog.LevelError:
+		return "bg-ERROR"
+	case slog.LevelWarn:
+		return "bg-WARN"
+	case slog.LevelDebug:
+		return "bg-DEBUG"
+	default:
+		return "bg-INFO"
+	}
 }
